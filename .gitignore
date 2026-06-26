@@ -1,0 +1,4 @@
+artifacts/
+*.tar.gz
+*.sha256
+dist/

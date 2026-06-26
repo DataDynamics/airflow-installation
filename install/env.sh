@@ -63,6 +63,50 @@ export AF_SECRET_KEY="${AF_SECRET_KEY:-}"
 # --- Executor (Phase1=LocalExecutor / Phase2=CeleryExecutor) ---
 export AF_EXECUTOR="${AF_EXECUTOR:-LocalExecutor}"
 
+# === [6] airflow.cfg 주요 설정 (설치 시 적용, 중간 규모 프로파일 기본값) =========
+# 타임존(KST) / UI
+export AF_DEFAULT_TIMEZONE="${AF_DEFAULT_TIMEZONE:-Asia/Seoul}"
+export AF_UI_TIMEZONE="${AF_UI_TIMEZONE:-Asia/Seoul}"
+export AF_EXPOSE_CONFIG="${AF_EXPOSE_CONFIG:-True}"            # UI Configuration 표시(True/non-sensitive-only/False)
+# 코어 동작
+export AF_LOAD_EXAMPLES="${AF_LOAD_EXAMPLES:-False}"
+export AF_DAGS_PAUSED_AT_CREATION="${AF_DAGS_PAUSED_AT_CREATION:-True}"
+export AF_DEFAULT_TASK_RETRIES="${AF_DEFAULT_TASK_RETRIES:-1}"
+export AF_DAGBAG_IMPORT_TIMEOUT="${AF_DAGBAG_IMPORT_TIMEOUT:-30}"
+export AF_DAG_FILE_PROCESSOR_TIMEOUT="${AF_DAG_FILE_PROCESSOR_TIMEOUT:-50}"
+# 성능(중간 규모: 4~8 vCPU 가정)
+export AF_PARALLELISM="${AF_PARALLELISM:-64}"
+export AF_MAX_ACTIVE_TASKS_PER_DAG="${AF_MAX_ACTIVE_TASKS_PER_DAG:-32}"
+export AF_MAX_ACTIVE_RUNS_PER_DAG="${AF_MAX_ACTIVE_RUNS_PER_DAG:-16}"
+export AF_MAX_TIS_PER_QUERY="${AF_MAX_TIS_PER_QUERY:-512}"
+# 스케줄러
+export AF_PARSING_PROCESSES="${AF_PARSING_PROCESSES:-4}"
+export AF_MIN_FILE_PROCESS_INTERVAL="${AF_MIN_FILE_PROCESS_INTERVAL:-30}"
+export AF_DAG_DIR_LIST_INTERVAL="${AF_DAG_DIR_LIST_INTERVAL:-300}"
+export AF_SCHEDULER_HEARTBEAT_SEC="${AF_SCHEDULER_HEARTBEAT_SEC:-5}"
+export AF_CATCHUP_BY_DEFAULT="${AF_CATCHUP_BY_DEFAULT:-False}"
+# DB 커넥션 풀
+export AF_SQL_POOL_SIZE="${AF_SQL_POOL_SIZE:-10}"
+export AF_SQL_MAX_OVERFLOW="${AF_SQL_MAX_OVERFLOW:-20}"
+export AF_SQL_POOL_RECYCLE="${AF_SQL_POOL_RECYCLE:-1800}"
+export AF_SQL_POOL_PRE_PING="${AF_SQL_POOL_PRE_PING:-True}"
+# Celery 워커
+export AF_CELERY_WORKER_CONCURRENCY="${AF_CELERY_WORKER_CONCURRENCY:-16}"
+# Webserver(gunicorn)
+export AF_WEBSERVER_WORKERS="${AF_WEBSERVER_WORKERS:-4}"
+export AF_WORKER_CLASS="${AF_WORKER_CLASS:-sync}"             # async extra 있으면 gevent 가능
+export AF_WEB_WORKER_TIMEOUT="${AF_WEB_WORKER_TIMEOUT:-120}"
+export AF_WEB_SERVER_PORT="${AF_WEB_SERVER_PORT:-8080}"
+# 표시/보안
+export AF_INSTANCE_NAME="${AF_INSTANCE_NAME:-AIRFLOW}"
+export AF_NAVBAR_COLOR="${AF_NAVBAR_COLOR:-#fff0e4}"
+export AF_EXPOSE_HOSTNAME="${AF_EXPOSE_HOSTNAME:-False}"
+export AF_EXPOSE_STACKTRACE="${AF_EXPOSE_STACKTRACE:-False}"
+export AF_WARN_DEPLOYMENT_EXPOSURE="${AF_WARN_DEPLOYMENT_EXPOSURE:-True}"
+# 로깅 / API
+export AF_LOGGING_LEVEL="${AF_LOGGING_LEVEL:-INFO}"
+export AF_API_AUTH_BACKENDS="${AF_API_AUTH_BACKENDS:-airflow.api.auth.backend.session}"
+
 # === [5] Phase2 클러스터(역할/IP) ============================================
 # ROLE=control : web(webserver+scheduler)+메타DB+브로커  (단일노드 Phase1도 control)
 # ROLE=worker  : celery worker 전용. DB/Redis 는 control 에 원격 접속(로컬 설치 안 함)

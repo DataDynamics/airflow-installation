@@ -50,14 +50,52 @@ cat > "${CFG}" <<EOF
 executor = ${AF_EXECUTOR}
 dags_folder = ${AIRFLOW_HOME}/dags
 plugins_folder = ${AIRFLOW_HOME}/plugins
-load_examples = False
-parallelism = 16
+default_timezone = ${AF_DEFAULT_TIMEZONE}
+load_examples = ${AF_LOAD_EXAMPLES}
+dags_are_paused_at_creation = ${AF_DAGS_PAUSED_AT_CREATION}
+default_task_retries = ${AF_DEFAULT_TASK_RETRIES}
+dagbag_import_timeout = ${AF_DAGBAG_IMPORT_TIMEOUT}
+dag_file_processor_timeout = ${AF_DAG_FILE_PROCESSOR_TIMEOUT}
+parallelism = ${AF_PARALLELISM}
+max_active_tasks_per_dag = ${AF_MAX_ACTIVE_TASKS_PER_DAG}
+max_active_runs_per_dag = ${AF_MAX_ACTIVE_RUNS_PER_DAG}
+
+[database]
+sql_alchemy_pool_size = ${AF_SQL_POOL_SIZE}
+sql_alchemy_max_overflow = ${AF_SQL_MAX_OVERFLOW}
+sql_alchemy_pool_recycle = ${AF_SQL_POOL_RECYCLE}
+sql_alchemy_pool_pre_ping = ${AF_SQL_POOL_PRE_PING}
+
+[scheduler]
+parsing_processes = ${AF_PARSING_PROCESSES}
+min_file_process_interval = ${AF_MIN_FILE_PROCESS_INTERVAL}
+dag_dir_list_interval = ${AF_DAG_DIR_LIST_INTERVAL}
+scheduler_heartbeat_sec = ${AF_SCHEDULER_HEARTBEAT_SEC}
+catchup_by_default = ${AF_CATCHUP_BY_DEFAULT}
+max_tis_per_query = ${AF_MAX_TIS_PER_QUERY}
+
+[celery]
+worker_concurrency = ${AF_CELERY_WORKER_CONCURRENCY}
 
 [logging]
 base_log_folder = ${AIRFLOW_HOME}/logs
+logging_level = ${AF_LOGGING_LEVEL}
+
+[api]
+auth_backends = ${AF_API_AUTH_BACKENDS}
 
 [webserver]
-web_server_port = 8080
+web_server_port = ${AF_WEB_SERVER_PORT}
+default_ui_timezone = ${AF_UI_TIMEZONE}
+expose_config = ${AF_EXPOSE_CONFIG}
+instance_name = ${AF_INSTANCE_NAME}
+navbar_color = ${AF_NAVBAR_COLOR}
+expose_hostname = ${AF_EXPOSE_HOSTNAME}
+expose_stacktrace = ${AF_EXPOSE_STACKTRACE}
+warn_deployment_exposure = ${AF_WARN_DEPLOYMENT_EXPOSURE}
+workers = ${AF_WEBSERVER_WORKERS}
+worker_class = ${AF_WORKER_CLASS}
+web_server_worker_timeout = ${AF_WEB_WORKER_TIMEOUT}
 EOF
 chown "${AIRFLOW_USER}:${AIRFLOW_GROUP}" "${CFG}"; chmod 640 "${CFG}"
 

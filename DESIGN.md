@@ -465,6 +465,22 @@ fernet/secret 키 결정 우선순위: **env 주입(`AF_FERNET_KEY`/`AF_SECRET_K
 - secrets 값은 **공백 없는 값** 전제(systemd EnvironmentFile/bash source 호환). 공백 포함 비번은 인용 처리 필요.
 - 인라인-cfg(구버전)→env 전환 시 **기존 cfg의 키를 추출해 `AF_*_KEY`로 주입**해야 키 보존(이번 마이그레이션에 적용).
 
+### airflow.cfg 주요 설정 (설치 시 적용, `AF_*` 변수)
+`05`가 생성하는 secret-free `airflow.cfg`에 `env.sh` 의 `AF_*` 값으로 렌더링. 기본은 **중간 규모 프로파일 + KST**.
+모두 설치 시 환경변수로 override 가능. (검증: `airflow config get-value` 로 Airflow가 수용 확인)
+
+| 분류 | 키(env / cfg) | 기본값 |
+|---|---|---|
+| 타임존 | `AF_DEFAULT_TIMEZONE` / `[core]default_timezone`, `AF_UI_TIMEZONE` / `[webserver]default_ui_timezone` | `Asia/Seoul` |
+| UI config | `AF_EXPOSE_CONFIG` / `[webserver]expose_config` | `True` |
+| 성능 | `AF_PARALLELISM`(64), `AF_MAX_ACTIVE_TASKS_PER_DAG`(32), `AF_MAX_ACTIVE_RUNS_PER_DAG`(16), `AF_MAX_TIS_PER_QUERY`(512) | (중간 규모) |
+| 스케줄러 | `AF_PARSING_PROCESSES`(4), `AF_MIN_FILE_PROCESS_INTERVAL`(30), `AF_DAG_DIR_LIST_INTERVAL`(300), `AF_SCHEDULER_HEARTBEAT_SEC`(5), `AF_CATCHUP_BY_DEFAULT`(False) | |
+| DB 풀 | `AF_SQL_POOL_SIZE`(10), `AF_SQL_MAX_OVERFLOW`(20), `AF_SQL_POOL_RECYCLE`(1800), `AF_SQL_POOL_PRE_PING`(True) | |
+| Celery | `AF_CELERY_WORKER_CONCURRENCY`(16) | |
+| Webserver | `AF_WEBSERVER_WORKERS`(4), `AF_WORKER_CLASS`(sync; async extra면 gevent), `AF_WEB_WORKER_TIMEOUT`(120) | |
+| 표시/보안 | `AF_INSTANCE_NAME`(AIRFLOW), `AF_NAVBAR_COLOR`, `AF_EXPOSE_HOSTNAME`(False), `AF_EXPOSE_STACKTRACE`(False), `AF_WARN_DEPLOYMENT_EXPOSURE`(True) | |
+| 코어/로깅/API | `AF_LOAD_EXAMPLES`(False), `AF_DAGS_PAUSED_AT_CREATION`(True), `AF_DEFAULT_TASK_RETRIES`(1), `AF_LOGGING_LEVEL`(INFO), `AF_API_AUTH_BACKENDS` | |
+
 ## 11-A. 구축 결과 (AS-BUILT, 2026-06-26, 192.168.122.62 단일노드)
 
 | 항목 | 결과 |

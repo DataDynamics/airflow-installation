@@ -112,10 +112,13 @@ airgap 대상은 repo가 사내에 있으므로 **dnf로 직접 설치**(별도 
 
 ---
 
-## 5. 빌드 단계 (오케스트레이터: Ubuntu+docker)
+## 5. 빌드 단계 (빌드머신: 인터넷 필요)
 
-목표: RHEL9 ABI/Python3.9 와 **완전히 호환되는 wheel 묶음** 생성.
-→ `registry.access.redhat.com/ubi9/python-39` 컨테이너 사용 (RHEL9 glibc/Python3.9 동일).
+목표: RHEL9 ABI/Python3.9 와 **완전히 호환되는 wheel 묶음** 생성. 두 가지 빌드 변형 제공(택1, 동일 산출물):
+- **`build/build-wheelhouse-docker.sh`** — docker 되는 아무 OS(Ubuntu 등)에서 `registry.access.redhat.com/ubi9/python-39` 컨테이너로 빌드(RHEL9 glibc/Python3.9 동일).
+- **`build/build-wheelhouse-rhel.sh`** — RHEL 9.4(또는 Rocky/Alma 9) 빌드머신에서 **시스템 python3.9로 네이티브 빌드**(docker 불필요, 임시 venv 격리). 대상과 동일 OS라 가장 정합.
+
+아래 5.1은 docker 변형의 핵심 로직(네이티브 변형도 동일하게 `pip wheel`로 수집).
 
 ### 5.1 wheelhouse 생성
 ```bash
@@ -335,8 +338,10 @@ systemctl enable --now airflow-scheduler airflow-webserver
 ```
 airflow-installation/
 ├─ DESIGN.md                  # 본 문서
-├─ build/                     # (예정) 오케스트레이터 wheelhouse 빌드 스크립트
-│   └─ build-wheelhouse.sh
+├─ build/                     # wheelhouse 빌드 + 번들 패키징 (인터넷)
+│   ├─ build-wheelhouse-docker.sh   # docker(ubi9/python-39) 기반
+│   ├─ build-wheelhouse-rhel.sh     # RHEL 9.4 네이티브
+│   └─ package.sh
 ├─ install/                   # (예정) 대상 서버 설치 스크립트
 │   ├─ 00-repo.sh  01-os-packages.sh  02-venv-offline.sh
 │   ├─ 03-postgres.sh  04-redis.sh  05-airflow-cfg.sh

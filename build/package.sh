@@ -2,7 +2,7 @@
 #
 # airgap 배포 번들 생성: wheelhouse + constraints + 설치 스크립트 + 문서를
 # 단일 tar.gz 로 묶어 서버에 업로드할 수 있게 한다.
-# 사전: build-wheelhouse.sh 로 artifacts/wheelhouse 가 생성되어 있어야 함.
+# 사전: build-wheelhouse-docker.sh 또는 -rhel.sh 로 artifacts/wheelhouse 가 생성되어 있어야 함.
 #
 set -euo pipefail
 
@@ -16,9 +16,9 @@ BUNDLE="${DIST}/airflow-${AIRFLOW_VERSION}-airgap-bundle.tar.gz"
 
 # 사전조건 검증
 [ -d "${ART}/wheelhouse" ] && ls "${ART}/wheelhouse"/*.whl >/dev/null 2>&1 \
-  || { echo "ERROR: ${ART}/wheelhouse 비어있음 — 먼저 build/build-wheelhouse.sh 실행"; exit 1; }
+  || { echo "ERROR: ${ART}/wheelhouse 비어있음 — 먼저 build/build-wheelhouse-docker.sh(또는 -rhel.sh) 실행"; exit 1; }
 [ -f "${ART}/constraints-${PY_TAG}.txt" ] \
-  || { echo "ERROR: constraints-${PY_TAG}.txt 없음 — build-wheelhouse.sh 실행"; exit 1; }
+  || { echo "ERROR: constraints-${PY_TAG}.txt 없음 — build-wheelhouse-docker.sh(또는 -rhel.sh) 실행"; exit 1; }
 
 echo ">> 스테이징: ${STAGE}"
 rm -rf "${STAGE}"; mkdir -p "${STAGE}"

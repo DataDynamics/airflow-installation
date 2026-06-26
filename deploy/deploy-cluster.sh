@@ -8,7 +8,7 @@
 #   SSH_USER=root SSH_PASS=*** \
 #   ./deploy/deploy-cluster.sh
 #
-# 사전: build-wheelhouse.sh && package.sh 로 dist/번들 생성, cluster.env 준비(없으면 자동 생성).
+# 사전: build-wheelhouse-{docker,rhel}.sh 중 하나 && package.sh 로 dist/번들 생성, cluster.env 준비(없으면 자동 생성).
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AIRFLOW_VERSION="${AIRFLOW_VERSION:-2.11.0}"

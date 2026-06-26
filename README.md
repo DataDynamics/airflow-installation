@@ -17,7 +17,7 @@ CeleryExecutor 다중 노드(Phase 2, 1 web + 3 celery)로 확장한다.
 flowchart LR
   subgraph BUILD["🌐 인터넷 빌드머신 (Ubuntu + docker)"]
     direction TB
-    A["build-wheelhouse.sh<br/>(ubi9/python-39 컨테이너)"] --> B["wheelhouse<br/>163 wheels + constraints"]
+    A["build-wheelhouse-docker.sh (컨테이너)<br/>또는 build-wheelhouse-rhel.sh (네이티브)"] --> B["wheelhouse<br/>163 wheels + constraints"]
     B --> C["package.sh"]
     C --> D[("airgap 번들<br/>airflow-2.11.0-airgap-bundle.tar.gz")]
   end
@@ -127,8 +127,9 @@ flowchart TB
 
 ### 빌드 (인터넷 빌드머신)
 ```bash
-./build/build-wheelhouse.sh      # wheelhouse 생성 (ubi9/python-39)
-./build/package.sh               # dist/airflow-2.11.0-airgap-bundle.tar.gz 생성
+./build/build-wheelhouse-docker.sh   # wheelhouse 생성 (docker, ubi9/python-39)
+#   또는  ./build/build-wheelhouse-rhel.sh   # RHEL 9.4 네이티브(docker 불필요)
+./build/package.sh                   # dist/airflow-2.11.0-airgap-bundle.tar.gz 생성
 ```
 
 ### Phase 1 설치 (대상 서버)
@@ -160,7 +161,7 @@ CONTROL_IP=192.168.0.1 WORKER_IPS="192.168.0.2 192.168.0.3 192.168.0.4" \
 
 ## 6. 저장소 구조
 ```
-build/    build-wheelhouse.sh · package.sh          # 빌드/패키징 (인터넷)
+build/    build-wheelhouse-docker.sh · build-wheelhouse-rhel.sh · package.sh  # 빌드/패키징 (인터넷)
 install/  00~06 · install-all.sh · env.sh           # 대상 설치 (오프라인)
           gen-cluster-keys.sh · 99-teardown.sh
 deploy/   deploy-cluster.sh · print-node-commands.sh # Phase2 배포 (모드 A/B)

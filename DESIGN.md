@@ -44,31 +44,48 @@
 ### Phase 1 — 단일 노드 (현재 목표)
 모든 컴포넌트를 192.168.122.62 한 대에 설치. **Executor = LocalExecutor**.
 
-```
-┌─────────────────── 192.168.122.62 ───────────────────┐
-│  airflow webserver (gunicorn :8080)                   │
-│  airflow scheduler                                    │
-│  ─ LocalExecutor (스케줄러 프로세스 내 병렬 실행) ─    │
-│  PostgreSQL 15 (메타DB, :5432, localhost)             │
-│  Redis (Phase2 대비 설치만, :6379, localhost)         │
-└───────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+  User(["운영자 브라우저"])
+  subgraph N["단일 노드 192.168.122.62"]
+    direction TB
+    WS["airflow webserver (gunicorn :8080)"]
+    SC["airflow scheduler<br/>(LocalExecutor — 프로세스 내 병렬)"]
+    PG[("PostgreSQL :5432<br/>메타DB · localhost")]
+    RD[("Redis :6379<br/>Phase2 대비 설치만 · localhost")]
+    WS --- PG
+    SC --- PG
+  end
+  User -->|":8080"| WS
 ```
 - 단일 노드에서는 Celery/Redis가 필수 아님. **하지만 Phase 2 무중단 확장을 위해 Redis는 설치만 해두고**, airflow.cfg는 LocalExecutor로 시작.
 
 ### Phase 2 — 1 web/scheduler + 3 celery worker (확장 시)
 **Executor = CeleryExecutor** 로 전환. 메타DB/브로커는 컨트롤 노드에 두고 워커가 원격 접속.
 
-```
-┌──── Control 노드 (192.168.122.62) ────┐     ┌─ worker1 ─┐
-│ webserver :8080                        │     │ celery     │
-│ scheduler (CeleryExecutor)             │◄────│ worker     │
-│ PostgreSQL :5432  (워커에 개방)        │     └────────────┘
-│ Redis :6379       (워커에 개방)        │     ┌─ worker2 ─┐
-│ flower :5555 (선택)                    │◄────│ celery     │
-└────────────────────────────────────────┘     └────────────┘
-                                                ┌─ worker3 ─┐
-                                          ◄─────│ celery     │
-                                                └────────────┘
+```mermaid
+flowchart TB
+  subgraph C["Control 노드 (web)"]
+    direction TB
+    WS["webserver :8080"]
+    SC["scheduler (CeleryExecutor)"]
+    PG[("PostgreSQL :5432<br/>워커에 개방")]
+    RD[("Redis :6379<br/>워커에 개방")]
+    FL["flower :5555 (선택)"]
+  end
+  subgraph WK["celery workers"]
+    direction TB
+    W1["worker1"]
+    W2["worker2"]
+    W3["worker3"]
+  end
+  SC -->|enqueue| RD
+  RD -->|consume| W1
+  RD -->|consume| W2
+  RD -->|consume| W3
+  W1 -->|상태/결과| PG
+  W2 -->|상태/결과| PG
+  W3 -->|상태/결과| PG
 ```
 전환 시 변경점은 §8 참조 (executor, broker_url, result_backend, DB/Redis bind 주소, 방화벽).
 
@@ -343,21 +360,26 @@ systemctl enable --now airflow-scheduler airflow-webserver
 ---
 
 ## 10. 산출물 구조 (이 저장소)
-```
-airflow-installation/
-├─ DESIGN.md                  # 본 문서
-├─ build/                     # wheelhouse 빌드 + RPM 추출 + 번들 패키징 (인터넷/미러)
-│   ├─ build-wheelhouse-docker.sh   # Python wheel: docker(ubi9/python-39)
-│   ├─ build-wheelhouse-rhel.sh     # Python wheel: RHEL 9.4 네이티브
-│   ├─ extract-rpms-docker.sh       # OS RPM 추출: docker
-│   ├─ extract-rpms-rhel.sh         # OS RPM 추출: RHEL 네이티브
-│   ├─ os-packages.list             # OS 패키지 superset 목록
-│   └─ package.sh
-├─ install/                   # (예정) 대상 서버 설치 스크립트
-│   ├─ 00-repo.sh  01-os-packages.sh  02-venv-offline.sh
-│   ├─ 03-postgres.sh  04-redis.sh  05-airflow-cfg.sh
-│   └─ systemd/*.service
-└─ artifacts/                 # 빌드 산출물(wheelhouse, constraints) — git 제외
+```mermaid
+graph LR
+  R["airflow-installation/"]
+  R --> B["build/ — 빌드/추출/패키징 (인터넷·미러)"]
+  R --> I["install/ — 대상 설치 (오프라인)"]
+  R --> D["deploy/ — Phase2 배포(모드 A/B)"]
+  R --> DOC["README.md · DESIGN.md"]
+  R --> ART["artifacts/ · dist/ — 산출물(git 제외)"]
+
+  B --> B1["build-wheelhouse-docker.sh / -rhel.sh"]
+  B --> B2["extract-rpms-docker.sh / -rhel.sh"]
+  B --> B3["os-packages.list · package.sh"]
+
+  I --> I1["00-repo · 01-os-packages · 02-venv-offline"]
+  I --> I2["03-postgres · 03b-db-external · 04-redis · 06-selinux"]
+  I --> I3["05-airflow-init · install-all.sh · env.sh"]
+  I --> I4["gen-cluster-keys.sh · 99-teardown.sh"]
+
+  D --> D1["deploy-cluster.sh (모드 A)"]
+  D --> D2["print-node-commands.sh (모드 B)"]
 ```
 
 ---

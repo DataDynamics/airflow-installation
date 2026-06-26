@@ -4,14 +4,13 @@
 RHEL 9.4 / Python 3.9 호환 **wheel**로 만들고(`build-wheelhouse-*.sh`), 설치 스크립트까지
 합쳐 **단일 airgap 번들**로 묶는다(`package.sh`). 산출물을 폐쇄망으로 옮겨 설치한다.
 
-```
-build-wheelhouse-docker.sh  ┐
-   또는                       ├─> artifacts/wheelhouse/*.whl (+constraints)  (Python 패키지)
-build-wheelhouse-rhel.sh    ┘            │
-extract-rpms-docker.sh      ┐            │
-   또는 (선택)                ├─> artifacts/rpms/*.rpm (+repodata)           (OS 패키지)
-extract-rpms-rhel.sh        ┘            │
-package.sh ────────────────────> dist/airflow-<버전>-airgap-bundle.tar.gz (+ .sha256)
+```mermaid
+flowchart LR
+  WD["build-wheelhouse-docker.sh<br/>또는 -rhel.sh"] --> WH["artifacts/wheelhouse/*.whl<br/>(+constraints) · Python 패키지"]
+  XD["extract-rpms-docker.sh<br/>또는 -rhel.sh (선택)"] --> RP["artifacts/rpms/*.rpm<br/>(+repodata) · OS 패키지"]
+  WH --> PK["package.sh"]
+  RP -. "있으면 포함" .-> PK
+  PK --> BD[("dist/airflow-&lt;버전&gt;-airgap-bundle.tar.gz<br/>(+ .sha256)")]
 ```
 
 > **Python 3.9는 RHEL 9.4 기본 제공** → 별도 빌드/패키징 불필요(설치 시 시스템 python3 사용).

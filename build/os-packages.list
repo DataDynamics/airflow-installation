@@ -1,0 +1,21 @@
+# Airflow airgap 설치에 필요한 OS 패키지(superset) — 역할/모드 전체 커버.
+# extract-rpms-*.sh 가 이 목록 + 의존성을 yum repo에서 추출한다.
+# (Python 3.9 는 RHEL 9.4 기본 제공이라 별도 포함 불필요 — python3* 는 devel/pip 보강용)
+# '#' 주석/빈 줄 무시.
+python3
+python3-pip
+python3-devel
+gcc
+gcc-c++
+make
+libpq
+libpq-devel
+postgresql
+postgresql-server
+postgresql-contrib
+redis
+policycoreutils-python-utils
+tar
+gzip
+which
+procps-ng

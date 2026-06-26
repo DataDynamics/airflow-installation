@@ -28,23 +28,36 @@ cp -a "${REPO_ROOT}/install"/. "${STAGE}/install/"
 # 2) wheelhouse + constraints  (env.sh 기본 INSTALL_DIR 레이아웃과 일치하도록 최상위에 배치)
 cp -a "${ART}/wheelhouse" "${STAGE}/wheelhouse"
 cp -a "${ART}/constraints-${PY_TAG}.txt" "${STAGE}/"
-# 3) 참고 문서
+# 3) OS RPM 로컬 repo (선택 — extract-rpms-*.sh 로 생성됐을 때만 포함)
+RPMS=0
+if [ -d "${ART}/rpms" ] && [ -f "${ART}/rpms/repodata/repomd.xml" ]; then
+  cp -a "${ART}/rpms" "${STAGE}/rpms"
+  RPMS=$(ls -1 "${STAGE}/rpms"/*.rpm 2>/dev/null | wc -l)
+  echo ">> OS RPM 로컬 repo 포함: ${RPMS}개"
+else
+  echo ">> (OS RPM 미포함 — target 이 사내 미러로 dnf 설치. 오프라인 RPM 원하면 extract-rpms-*.sh 실행)"
+fi
+
+# 4) 참고 문서
 cp -a "${REPO_ROOT}/DESIGN.md" "${STAGE}/" 2>/dev/null || true
 
-# 4) 매니페스트
+# 5) 매니페스트
 WHEELS=$(ls -1 "${STAGE}/wheelhouse"/*.whl | wc -l)
 cat > "${STAGE}/MANIFEST.txt" <<EOF
 Airflow airgap bundle
   airflow_version : ${AIRFLOW_VERSION}
   python_tag      : ${PY_TAG}
   wheels          : ${WHEELS}
+  os_rpms         : ${RPMS}   (0이면 미포함 → target 이 사내 미러로 dnf)
   layout:
     install/                설치 스크립트(00~06, install-all.sh, env.sh, 99-teardown.sh)
     wheelhouse/             오프라인 wheel (${WHEELS}개)
+    rpms/                   OS 패키지 로컬 repo (${RPMS}개, 있을 때만 / RPM_SOURCE=bundle 로 사용)
     constraints-${PY_TAG}.txt   pip constraints
     DESIGN.md               설계/런북
 
 서버 설치(예: 기본 /opt, 로컬 DB):
+  # OS 패키지를 번들 RPM(오프라인)으로 설치하려면 RPM_SOURCE=bundle 추가
   1) scp airflow-${AIRFLOW_VERSION}-airgap-bundle.tar.gz* root@<server>:/opt/
   2) ssh root@<server>
   3) mkdir -p /opt/airflow-install && tar xzf /opt/airflow-${AIRFLOW_VERSION}-airgap-bundle.tar.gz \\
@@ -62,5 +75,5 @@ tar czf "${BUNDLE}" -C "${DIST}" "$(basename "${STAGE}")"
 echo ">> 완료"
 ls -lh "${BUNDLE}"*
 echo "----- 번들 내부(요약) -----"
-tar tzf "${BUNDLE}" | sed 's#^#  #' | grep -vE '/wheelhouse/.+\.whl$' | head -40
-echo "  (+ wheelhouse/*.whl ${WHEELS}개)"
+tar tzf "${BUNDLE}" | sed 's#^#  #' | grep -vE '/(wheelhouse/.+\.whl|rpms/.+\.rpm)$' | head -40
+echo "  (+ wheelhouse/*.whl ${WHEELS}개, rpms/*.rpm ${RPMS}개)"

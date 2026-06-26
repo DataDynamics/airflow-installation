@@ -15,18 +15,20 @@ CeleryExecutor 다중 노드(Phase 2, 1 web + 3 celery)로 확장한다.
 
 ```mermaid
 flowchart LR
-  subgraph BUILD["🌐 인터넷 빌드머신 (Ubuntu + docker)"]
+  subgraph BUILD["🌐 빌드머신 (인터넷 + 미러 접근)"]
     direction TB
-    A["build-wheelhouse-docker.sh (컨테이너)<br/>또는 build-wheelhouse-rhel.sh (네이티브)"] --> B["wheelhouse<br/>163 wheels + constraints"]
+    A["build-wheelhouse-docker.sh / -rhel.sh"] --> B["wheelhouse<br/>163 wheels (Python 패키지)"]
+    A2["extract-rpms-docker.sh / -rhel.sh<br/>(선택)"] --> B2["rpms<br/>OS 패키지 로컬 repo"]
     B --> C["package.sh"]
+    B2 -. "있으면 포함" .-> C
     C --> D[("airgap 번들<br/>airflow-2.11.0-airgap-bundle.tar.gz")]
   end
 
   D -. "scp / 승인된 매체" .-> E
 
-  subgraph AIR["🔒 airgap 망 (RHEL 9.4)"]
+  subgraph AIR["🔒 airgap 망 (RHEL 9.4, Python 3.9 기본 제공)"]
     direction TB
-    M[("사내 RHEL 미러<br/>10.0.1.102")] -. "dnf (OS 패키지)" .-> E
+    M[("사내 RHEL 미러<br/>10.0.1.102")] -. "RPM_SOURCE=mirror (dnf)" .-> E
     E["install-all.sh<br/>(오프라인 설치)"] --> F["Airflow 가동"]
   end
 ```
@@ -129,6 +131,7 @@ flowchart TB
 ```bash
 ./build/build-wheelhouse-docker.sh   # wheelhouse 생성 (docker, ubi9/python-39)
 #   또는  ./build/build-wheelhouse-rhel.sh   # RHEL 9.4 네이티브(docker 불필요)
+./build/extract-rpms-docker.sh       # (선택) OS RPM 추출 — 완전 오프라인 설치용 (또는 -rhel.sh)
 ./build/package.sh                   # dist/airflow-2.11.0-airgap-bundle.tar.gz 생성
 ```
 
@@ -138,6 +141,7 @@ mkdir -p /opt/airflow-install
 tar xzf airflow-2.11.0-airgap-bundle.tar.gz -C /opt/airflow-install --strip-components=1
 cd /opt/airflow-install
 PG_PASSWORD=*** AF_ADMIN_PASSWORD=*** ./install/install-all.sh
+#   OS 패키지를 번들 RPM(미러 불필요)으로 설치하려면:  RPM_SOURCE=bundle 추가
 ```
 
 ### Phase 2 설치
@@ -161,7 +165,8 @@ CONTROL_IP=192.168.0.1 WORKER_IPS="192.168.0.2 192.168.0.3 192.168.0.4" \
 
 ## 6. 저장소 구조
 ```
-build/    build-wheelhouse-docker.sh · build-wheelhouse-rhel.sh · package.sh  # 빌드/패키징 (인터넷)
+build/    build-wheelhouse-{docker,rhel}.sh · extract-rpms-{docker,rhel}.sh   # 빌드/추출
+          os-packages.list · package.sh                                      # 목록/패키징
 install/  00~06 · install-all.sh · env.sh           # 대상 설치 (오프라인)
           gen-cluster-keys.sh · 99-teardown.sh
 deploy/   deploy-cluster.sh · print-node-commands.sh # Phase2 배포 (모드 A/B)

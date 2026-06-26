@@ -104,6 +104,11 @@ airgap 대상은 repo가 사내에 있으므로 **dnf로 직접 설치**(별도 
 
 > 비고: wheel을 컨테이너에서 **완전 바이너리(wheel)** 로 빌드하므로 대상에서 컴파일이 필요 없도록 설계. 단 안전망으로 `gcc`/`*-devel` 은 설치해 둠.
 
+> **Python 3.9는 RHEL 9.4 기본 제공** → 별도 빌드/패키징하지 않고 시스템 `python3` 를 그대로 사용.
+> **OS 패키지(RPM) 두 경로** (`RPM_SOURCE`):
+> - `mirror`(기본): 설치 시 사내 미러(10.0.1.102)에서 `dnf`. target 이 미러에 접근 가능할 때.
+> - `bundle`: `build/extract-rpms-*.sh` 가 `os-packages.list` + **전체 의존성**을 미러에서 추출(`dnf download --resolve --alldeps` + `createrepo_c`)해 `artifacts/rpms` 로컬 repo 생성 → 번들에 포함 → target 이 **미러 없이 완전 오프라인**(`file://` 로컬 repo)으로 설치. (검증: `--network none` 컨테이너에서 266 RPM 로컬 repo만으로 설치 성공)
+
 ### 4.2 Python 패키지 (wheelhouse — 컨테이너에서 생성)
 - 설치 extras: `apache-airflow[celery,postgres,redis]==2.11.0`
 - 제약: 공식 constraints
@@ -338,9 +343,12 @@ systemctl enable --now airflow-scheduler airflow-webserver
 ```
 airflow-installation/
 ├─ DESIGN.md                  # 본 문서
-├─ build/                     # wheelhouse 빌드 + 번들 패키징 (인터넷)
-│   ├─ build-wheelhouse-docker.sh   # docker(ubi9/python-39) 기반
-│   ├─ build-wheelhouse-rhel.sh     # RHEL 9.4 네이티브
+├─ build/                     # wheelhouse 빌드 + RPM 추출 + 번들 패키징 (인터넷/미러)
+│   ├─ build-wheelhouse-docker.sh   # Python wheel: docker(ubi9/python-39)
+│   ├─ build-wheelhouse-rhel.sh     # Python wheel: RHEL 9.4 네이티브
+│   ├─ extract-rpms-docker.sh       # OS RPM 추출: docker
+│   ├─ extract-rpms-rhel.sh         # OS RPM 추출: RHEL 네이티브
+│   ├─ os-packages.list             # OS 패키지 superset 목록
 │   └─ package.sh
 ├─ install/                   # (예정) 대상 서버 설치 스크립트
 │   ├─ 00-repo.sh  01-os-packages.sh  02-venv-offline.sh

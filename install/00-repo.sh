@@ -1,9 +1,25 @@
 #!/usr/bin/env bash
-# RHEL 9.4 사내 repo(BaseOS/AppStream) 등록. 대상 서버에서 root로 실행.
+# dnf repo 등록. 대상 서버에서 root로 실행.
+#  RPM_SOURCE=mirror : RHEL 9.4 사내 미러(BaseOS/AppStream) 등록 (기본)
+#  RPM_SOURCE=bundle : 번들에 포함된 로컬 repo(${LOCAL_RPM_DIR}) 만 등록(미러 불필요, 완전 오프라인)
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 
-cat > /etc/yum.repos.d/local-rhel94.repo <<EOF
+if [ "${RPM_SOURCE}" = "bundle" ]; then
+  [ -f "${LOCAL_RPM_DIR}/repodata/repomd.xml" ] || {
+    echo "ERROR: 번들 로컬 repo 없음 (${LOCAL_RPM_DIR}/repodata). extract-rpms-*.sh 로 RPM을 포함해 패키징했는지 확인"; exit 1; }
+  cat > /etc/yum.repos.d/airflow-airgap.repo <<EOF
+[airflow-airgap-local]
+name=Airflow airgap local RPMs
+baseurl=file://${LOCAL_RPM_DIR}
+enabled=1
+gpgcheck=0
+EOF
+  # 미러 충돌 방지: 사내 미러 repo가 있으면 비활성(있을 때만)
+  [ -f /etc/yum.repos.d/local-rhel94.repo ] && sed -i 's/^enabled=1/enabled=0/' /etc/yum.repos.d/local-rhel94.repo || true
+  echo ">> 번들 로컬 repo 등록: ${LOCAL_RPM_DIR}"
+else
+  cat > /etc/yum.repos.d/local-rhel94.repo <<EOF
 [local-baseos]
 name=RHEL 9.4 BaseOS (local)
 baseurl=${RHEL_REPO_BASE}/BaseOS/
@@ -16,8 +32,10 @@ baseurl=${RHEL_REPO_BASE}/AppStream/
 enabled=1
 gpgcheck=0
 EOF
+  echo ">> 사내 미러 repo 등록: ${RHEL_REPO_BASE}"
+fi
 
 dnf clean all
 dnf repolist
 dnf makecache
-echo ">> repo 등록 완료"
+echo ">> repo 등록 완료 (RPM_SOURCE=${RPM_SOURCE})"

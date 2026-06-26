@@ -6,7 +6,7 @@ set -euo pipefail
 # --- 설치 환경 ---
 export AIRFLOW_VERSION="2.11.0"
 export PY_TAG="3.9"
-export EXTRAS="celery,postgres,redis"
+export EXTRAS="celery,postgres,redis,common-sql,ssh,apache-kafka,sftp,ftp,hdfs,samba,pandas,uv,async,password,ldap"
 
 # === [1] 설치 경로 ============================================================
 # INSTALL_ROOT 만 바꾸면 전체 트리 이동. 예) 별도 디스크 /app:  INSTALL_ROOT=/app

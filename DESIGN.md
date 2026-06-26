@@ -110,9 +110,12 @@ airgap 대상은 repo가 사내에 있으므로 **dnf로 직접 설치**(별도 
 > - `bundle`: `build/extract-rpms-*.sh` 가 `os-packages.list` + **전체 의존성**을 미러에서 추출(`dnf download --resolve --alldeps` + `createrepo_c`)해 `artifacts/rpms` 로컬 repo 생성 → 번들에 포함 → target 이 **미러 없이 완전 오프라인**(`file://` 로컬 repo)으로 설치. (검증: `--network none` 컨테이너에서 266 RPM 로컬 repo만으로 설치 성공)
 
 ### 4.2 Python 패키지 (wheelhouse — 컨테이너에서 생성)
-- 설치 extras: `apache-airflow[celery,postgres,redis]==2.11.0`
-- 제약: 공식 constraints
-  `constraints-2.11.0/constraints-3.9.txt`
+- 설치 extras(`EXTRAS`, 빌드·설치 동일):
+  `celery,postgres,redis,common-sql,ssh,apache-kafka,sftp,ftp,hdfs,samba,pandas,uv,async,password,ldap`
+  → `apache-airflow[<EXTRAS>]==2.11.0`
+- **extra는 빌드 시점에 고정**: wheelhouse에 wheel이 있어야 오프라인 설치 가능. extra 추가 시 wheelhouse 재빌드 필요(`build-wheelhouse-*.sh`와 `install/env.sh`의 `EXTRAS` 일치).
+- **빌드 의존성 주의**: `ldap`(python-ldap)은 manylinux wheel이 없어 빌드 시 `openldap-devel`/`cyrus-sasl-devel` 헤더 필요(빌드 컨테이너/머신에 설치). 런타임 라이브러리(`openldap`,`cyrus-sasl-lib`)는 OS 패키지 목록에 포함.
+- 제약: 공식 constraints `constraints-2.11.0/constraints-3.9.txt`
 - 부트스트랩 포함: `pip` `setuptools` `wheel` (대상 venv용, 오프라인)
 
 ---

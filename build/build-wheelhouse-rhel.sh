@@ -8,7 +8,7 @@ set -euo pipefail
 
 AF_VERSION="${AF_VERSION:-2.11.0}"
 PY_TAG="3.9"
-EXTRAS="${EXTRAS:-celery,postgres,redis}"
+EXTRAS="${EXTRAS:-celery,postgres,redis,common-sql,ssh,apache-kafka,sftp,ftp,hdfs,samba,pandas,uv,async,password,ldap}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${REPO_ROOT}/artifacts"
@@ -32,7 +32,7 @@ PYV="$(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])')"
 # 1) 빌드 도구 (dnf 사용 가능할 때만; 실패해도 진행 — 대부분 manylinux wheel 사용)
 SUDO=""; [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null && SUDO="sudo"
 if command -v dnf >/dev/null; then
-  ${SUDO} dnf -y install gcc gcc-c++ make libpq-devel python3-devel python3-pip >/dev/null 2>&1 \
+  ${SUDO} dnf -y install gcc gcc-c++ make libpq-devel python3-devel python3-pip openldap-devel cyrus-sasl-devel krb5-devel >/dev/null 2>&1 \
     || echo "WARN: 빌드 패키지 설치 실패(이미 설치/repo 미구성). 계속 진행."
 fi
 

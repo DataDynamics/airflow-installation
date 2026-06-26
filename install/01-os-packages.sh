@@ -6,6 +6,7 @@ source "$(dirname "$0")/env.sh"
 # 공통(런타임/빌드안전망/관리)
 PKGS=(python3 python3-pip python3-devel gcc gcc-c++ make
       libpq libpq-devel
+      openldap cyrus-sasl-lib krb5-libs
       policycoreutils-python-utils tar gzip which procps-ng)
 
 # 로컬 DB 모드에서만 PostgreSQL 서버 설치 (external 모드는 클라이언트 libpq 만 필요)

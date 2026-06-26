@@ -7,7 +7,7 @@ set -euo pipefail
 
 AF_VERSION="${AF_VERSION:-2.11.0}"
 PY_TAG="3.9"
-EXTRAS="${EXTRAS:-celery,postgres,redis}"
+EXTRAS="${EXTRAS:-celery,postgres,redis,common-sql,ssh,apache-kafka,sftp,ftp,hdfs,samba,pandas,uv,async,password,ldap}"
 IMAGE="registry.access.redhat.com/ubi9/python-39:latest"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,7 +22,7 @@ echo ">> 산출물:    ${WH}"
 docker run --rm -u 0 -v "${OUT}:/out" "${IMAGE}" bash -lc "
   set -euo pipefail
   echo '--- 컨테이너 빌드 도구 설치 (sdist 대비 안전망) ---'
-  dnf -y install gcc gcc-c++ make libpq-devel python3-devel >/dev/null 2>&1 || true
+  dnf -y install gcc gcc-c++ make libpq-devel python3-devel openldap-devel cyrus-sasl-devel krb5-devel >/dev/null 2>&1 || true
   python -m pip install --upgrade pip wheel setuptools >/dev/null
 
   echo '--- constraints 다운로드 ---'

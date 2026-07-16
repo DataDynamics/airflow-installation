@@ -3,8 +3,8 @@
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 
-# 공통(런타임/빌드안전망/관리)
-PKGS=(python3 python3-pip python3-devel gcc gcc-c++ make
+# 공통(런타임/빌드안전망/관리) — Airflow 3.x 는 python3.11 (RHEL 9 AppStream)
+PKGS=(python3.11 python3.11-pip python3.11-devel gcc gcc-c++ make
       libpq libpq-devel
       openldap cyrus-sasl-lib krb5-libs
       policycoreutils-python-utils tar gzip which procps-ng)
@@ -19,5 +19,5 @@ if [ "${INSTALL_REDIS}" = "true" ]; then
 fi
 
 dnf -y install "${PKGS[@]}"
-python3 --version
+"${PYTHON_BIN}" --version
 echo ">> OS 패키지 설치 완료 (DB_MODE=${DB_MODE}, INSTALL_REDIS=${INSTALL_REDIS})"

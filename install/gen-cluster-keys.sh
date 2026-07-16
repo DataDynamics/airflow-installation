@@ -9,6 +9,7 @@ WORKER_CIDR="${3:-192.168.0.0/24}"
 # Fernet 키(32바이트 urlsafe base64) — python 의존 없이 생성
 FERNET="$(head -c32 /dev/urandom | base64 | tr '+/' '-_')"
 SECRET="$(openssl rand -hex 32)"
+JWT_SECRET="$(openssl rand -hex 32)"                              # 3.x: Execution API/UI 토큰 서명키
 PG_PW="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-20)"     # 공백/특수문자 없는 비번
 REDIS_PW="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-20)"
 ADMIN_PW="$(openssl rand -base64 12 | tr -d '/+=' | cut -c1-12)"
@@ -25,6 +26,7 @@ export REDIS_HOST=${CONTROL_IP}
 # --- 공유 비밀(전 노드 동일 필수) ---
 export AF_FERNET_KEY='${FERNET}'
 export AF_SECRET_KEY='${SECRET}'
+export AF_JWT_SECRET='${JWT_SECRET}'
 export PG_PASSWORD='${PG_PW}'
 export REDIS_PASSWORD='${REDIS_PW}'
 export AF_ADMIN_PASSWORD='${ADMIN_PW}'

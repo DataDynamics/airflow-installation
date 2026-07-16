@@ -11,7 +11,7 @@
 # 사전: build-wheelhouse-{docker,rhel}.sh 중 하나 && package.sh 로 dist/번들 생성, cluster.env 준비(없으면 자동 생성).
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-AIRFLOW_VERSION="${AIRFLOW_VERSION:-2.11.0}"
+AIRFLOW_VERSION="${AIRFLOW_VERSION:-3.3.0}"
 BUNDLE="${REPO_ROOT}/dist/airflow-${AIRFLOW_VERSION}-airgap-bundle.tar.gz"
 CLUSTER_ENV="${CLUSTER_ENV:-${REPO_ROOT}/dist/cluster.env}"
 REMOTE_DIR="${REMOTE_DIR:-/opt/airflow-install}"
@@ -46,7 +46,7 @@ push_and_install() {  # $1=IP $2=ROLE
 push_and_install "${CONTROL_IP}" control
 echo ">> control health 대기..."
 for i in $(seq 1 30); do
-  c=$($SSH "${SSH_USER}@${CONTROL_IP}" "curl -s -m3 -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health" 2>/dev/null || echo 000)
+  c=$($SSH "${SSH_USER}@${CONTROL_IP}" "curl -s -m3 -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/v2/monitor/health" 2>/dev/null || echo 000)
   [ "$c" = 200 ] && { echo "control healthy"; break; }; sleep 3
 done
 

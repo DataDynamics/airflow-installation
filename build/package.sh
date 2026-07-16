@@ -6,8 +6,8 @@
 #
 set -euo pipefail
 
-AIRFLOW_VERSION="${AIRFLOW_VERSION:-2.11.0}"
-PY_TAG="3.9"
+AIRFLOW_VERSION="${AIRFLOW_VERSION:-3.3.0}"
+PY_TAG="3.11"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ART="${REPO_ROOT}/artifacts"
 DIST="${REPO_ROOT}/dist"

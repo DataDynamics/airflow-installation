@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 #
-# Airflow 2.11 airgap wheelhouse 빌드 — RHEL 9.4 네이티브 (docker 불필요)
-# 인터넷이 되는 RHEL 9.4 빌드머신에서 시스템 Python 3.9 로 직접 빌드한다.
+# Airflow 3.x airgap wheelhouse 빌드 — RHEL 9 네이티브 (docker 불필요)
+# 인터넷이 되는 RHEL 9 빌드머신에서 AppStream python3.11 로 직접 빌드한다.
 # 대상과 동일 OS/Python ABI 라 가장 정합. (docker 버전: build-wheelhouse-docker.sh)
 #
 set -euo pipefail
 
-AF_VERSION="${AF_VERSION:-2.11.0}"
-PY_TAG="3.9"
-EXTRAS="${EXTRAS:-celery,postgres,redis,common-sql,ssh,apache-kafka,sftp,ftp,hdfs,samba,pandas,uv,async,password,ldap}"
+AF_VERSION="${AF_VERSION:-3.3.0}"
+PY_TAG="3.11"
+PYTHON_BIN="${PYTHON_BIN:-python3.11}"
+EXTRAS="${EXTRAS:-celery,postgres,redis,fab,standard,common-sql,ssh,apache-kafka,sftp,ftp,apache-hdfs,samba,pandas,uv,async,ldap}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${REPO_ROOT}/artifacts"
@@ -26,18 +27,18 @@ case "${PRETTY_NAME:-}" in
   *"Red Hat"*" 9."*|*Rocky*9*|*AlmaLinux*9*) : ;;
   *) echo "WARN: RHEL 9 계열이 아님 — 대상(RHEL 9.4)과 wheel ABI 불일치 가능";;
 esac
-PYV="$(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])')"
-[ "${PYV}" = "${PY_TAG}" ] || echo "WARN: 시스템 python3=${PYV} (대상 ${PY_TAG}와 다름) — 호환성 주의"
-
 # 1) 빌드 도구 (dnf 사용 가능할 때만; 실패해도 진행 — 대부분 manylinux wheel 사용)
 SUDO=""; [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null && SUDO="sudo"
 if command -v dnf >/dev/null; then
-  ${SUDO} dnf -y install gcc gcc-c++ make libpq-devel python3-devel python3-pip openldap-devel cyrus-sasl-devel krb5-devel >/dev/null 2>&1 \
+  ${SUDO} dnf -y install python3.11 python3.11-devel python3.11-pip gcc gcc-c++ make libpq-devel openldap-devel cyrus-sasl-devel krb5-devel >/dev/null 2>&1 \
     || echo "WARN: 빌드 패키지 설치 실패(이미 설치/repo 미구성). 계속 진행."
 fi
+command -v "${PYTHON_BIN}" >/dev/null || { echo "ERROR: ${PYTHON_BIN} 없음 — RHEL 9 AppStream python3.11 설치 필요"; exit 1; }
+PYV="$("${PYTHON_BIN}" -c 'import sys;print("%d.%d"%sys.version_info[:2])')"
+[ "${PYV}" = "${PY_TAG}" ] || echo "WARN: ${PYTHON_BIN}=${PYV} (대상 ${PY_TAG}와 다름) — 호환성 주의"
 
 # 2) 격리된 빌드 venv (시스템 오염 방지)
-python3 -m venv "${BUILD_VENV}"
+"${PYTHON_BIN}" -m venv "${BUILD_VENV}"
 PIP="${BUILD_VENV}/bin/pip"
 "${PIP}" install --upgrade pip wheel setuptools >/dev/null
 
@@ -51,6 +52,8 @@ echo ">> 부트스트랩(pip/setuptools/wheel) 수집"
 echo ">> airflow + 의존성 wheel 빌드: apache-airflow[${EXTRAS}]==${AF_VERSION}"
 "${PIP}" wheel "apache-airflow[${EXTRAS}]==${AF_VERSION}" \
   -c "${OUT}/constraints-${PY_TAG}.txt" -w "${WH}"
+# 패치버전 조건부 의존성 보충: async-timeout 은 python_full_version<3.11.3 (예: RHEL 9.2 의 3.11.2)에서만 필요
+"${PIP}" download -d "${WH}" -c "${OUT}/constraints-${PY_TAG}.txt" async-timeout
 
 echo ">> wheel 개수: $(ls -1 "${WH}"/*.whl 2>/dev/null | wc -l)"
 

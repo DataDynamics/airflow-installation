@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 # dnf repo 등록. 대상 서버에서 root로 실행.
-#  RPM_SOURCE=mirror : RHEL 9.4 사내 미러(BaseOS/AppStream) 등록 (기본)
+#  RPM_SOURCE=mirror : RHEL 사내 미러(BaseOS/AppStream) 등록 (기본)
 #  RPM_SOURCE=bundle : 번들에 포함된 로컬 repo(${LOCAL_RPM_DIR}) 만 등록(미러 불필요, 완전 오프라인)
+#  RPM_SOURCE=system : 대상 서버에 이미 구성된 repo(DVD ISO 등) 그대로 사용 — 등록 생략
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
+
+if [ "${RPM_SOURCE}" = "system" ]; then
+  echo ">> RPM_SOURCE=system → repo 등록 생략(기존 dnf 구성 사용)"
+  dnf repolist
+  exit 0
+fi
 
 if [ "${RPM_SOURCE}" = "bundle" ]; then
   [ -f "${LOCAL_RPM_DIR}/repodata/repomd.xml" ] || {

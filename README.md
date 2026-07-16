@@ -1,34 +1,36 @@
 # Apache Airflow Installation for Airgap
 
-RHEL 9.4 폐쇄망(airgap)에 Apache **Airflow 2.11** (Python 3.9, PostgreSQL + Redis)을
+RHEL 9 폐쇄망(airgap)에 Apache **Airflow 3.3.0** (Python 3.11, PostgreSQL + Redis)을
 오프라인으로 설치하기 위한 빌드/패키징/설치 자동화. 단일 노드(Phase 1)에서 시작해
-CeleryExecutor 다중 노드(Phase 2, 1 web + 3 celery)로 확장한다.
+CeleryExecutor 다중 노드(Phase 2, 1 control + 3 celery)로 확장한다.
 
-자세한 설계는 [`DESIGN.md`](./DESIGN.md) 참고.
+> Airflow 3.2부터 Python 3.9 지원이 제거되어 **RHEL 9 AppStream `python3.11`** 을 사용한다
+> (시스템 기본 python3(3.9)는 건드리지 않음). 자세한 설계는 [`DESIGN.md`](./DESIGN.md) 참고.
 
 ---
 
 ## 1. 전체 파이프라인 (빌드 ↔ airgap 경계)
 
 인터넷이 되는 빌드머신에서 wheel을 만들어 단일 번들로 묶고, airgap 망으로 옮겨 설치한다.
-대상 OS 패키지는 사내 RHEL 미러(`http://10.0.1.102/rhel-9.4/`)에서 `dnf`로 가져온다.
+대상 OS 패키지는 사내 RHEL 미러에서 `dnf`로 가져오거나(`RPM_SOURCE=mirror`),
+번들 RPM(`bundle`), 대상 서버의 기존 repo(`system`) 중 선택한다.
 
 ```mermaid
 flowchart LR
   subgraph BUILD["🌐 빌드머신 (인터넷 + 미러 접근)"]
     direction TB
-    A["build-wheelhouse-docker.sh / -rhel.sh"] --> B["wheelhouse<br/>163 wheels (Python 패키지)"]
+    A["build-wheelhouse-docker.sh / -rhel.sh<br/>(ubi9/python-311)"] --> B["wheelhouse<br/>(Python 3.11 wheels)"]
     A2["extract-rpms-docker.sh / -rhel.sh<br/>(선택)"] --> B2["rpms<br/>OS 패키지 로컬 repo"]
     B --> C["package.sh"]
     B2 -. "있으면 포함" .-> C
-    C --> D[("airgap 번들<br/>airflow-2.11.0-airgap-bundle.tar.gz")]
+    C --> D[("airgap 번들<br/>airflow-3.3.0-airgap-bundle.tar.gz")]
   end
 
   D -. "scp / 승인된 매체" .-> E
 
-  subgraph AIR["🔒 airgap 망 (RHEL 9.4, Python 3.9 기본 제공)"]
+  subgraph AIR["🔒 airgap 망 (RHEL 9, AppStream python3.11)"]
     direction TB
-    M[("사내 RHEL 미러<br/>10.0.1.102")] -. "RPM_SOURCE=mirror (dnf)" .-> E
+    M[("사내 RHEL 미러 /<br/>번들 RPM / 기존 repo")] -. "RPM_SOURCE" .-> E
     E["install-all.sh<br/>(오프라인 설치)"] --> F["Airflow 가동"]
   end
 ```
@@ -37,66 +39,83 @@ flowchart LR
 
 ## 2. Phase 1 — 단일 노드 (LocalExecutor)
 
-모든 컴포넌트를 한 노드에 설치. Redis는 Phase 2 대비로 설치만 해 둔다.
+Airflow 3.x는 컴포넌트가 4개 서비스로 분리된다:
+**api-server**(구 webserver, UI + REST + Task Execution API), **scheduler**,
+**dag-processor**(3.x부터 필수 독립 프로세스), **triggerer**(deferrable 태스크).
+Redis는 Phase 2 대비로 설치만 해 둔다.
 
 ```mermaid
 flowchart TB
   User(["운영자 브라우저"])
-  subgraph N["단일 노드 (예: 192.168.122.62)"]
+  subgraph N["단일 노드 (예: 192.168.122.191)"]
     direction TB
-    WS["webserver :8080"]
+    API["api-server :8080<br/>(UI · REST · Execution API)"]
     SC["scheduler<br/>(LocalExecutor)"]
+    DP["dag-processor"]
+    TR["triggerer"]
     PG[("PostgreSQL :5432<br/>메타DB")]
     RD[("Redis :6379<br/>Phase2 대비")]
-    WS --- PG
+    API --- PG
     SC --- PG
+    DP --- PG
+    TR --- PG
+    SC -->|"태스크 실행 시<br/>Execution API 호출"| API
   end
-  User -->|":8080"| WS
+  User -->|":8080"| API
 ```
 
-- 실행계정 `airflow`, `AIRFLOW_HOME=/opt/airflow`, venv `/opt/airflow/venv`
-- 비밀(DB비번/fernet/secret)은 `airflow.cfg`가 아닌 **`airflow-secrets.env`(600)** 에 환경변수로 분리
+- 실행계정 `airflow`, `AIRFLOW_HOME=/opt/airflow`, venv `/opt/airflow/venv` (python3.11)
+- 비밀(DB비번/fernet/secret/**jwt**)은 `airflow.cfg`가 아닌 **`airflow-secrets.env`(600)** 에 환경변수로 분리
+- 인증은 FAB auth manager(`fab` provider) — 2.x와 동일하게 `airflow users create` 사용 가능
 
 ---
 
-## 3. Phase 2 — CeleryExecutor (1 web + 3 celery)
+## 3. Phase 2 — CeleryExecutor (1 control + 3 celery)
 
-`web`(control) 노드에 webserver+scheduler+메타DB+브로커를 두고, 워커 3대가
-control IP로 **원격 접속**한다. 모든 노드는 동일한 `cluster.env`(공유 키/비번)를 사용한다.
+`control` 노드에 api-server+scheduler+dag-processor+triggerer+메타DB+브로커를 두고,
+워커 3대가 control IP로 **원격 접속**한다. 모든 노드는 동일한 `cluster.env`(공유 키/비번)를 사용한다.
+
+**Airflow 3.x 통신 구조 변경**: 워커의 태스크는 메타DB에 직접 붙지 않고 control의
+**Task Execution API(:8080/execution/)** 를 호출한다. 워커가 control에 필요로 하는 포트:
+`6379`(브로커) + `5432`(celery result backend) + `8080`(Execution API). 로그 서빙은 워커 `8793`.
 
 ```mermaid
 flowchart TB
   User(["운영자 브라우저"])
 
-  subgraph C["web / control — 192.168.0.1"]
+  subgraph C["control — 192.168.0.1"]
     direction TB
-    WS["webserver :8080"]
-    SC["scheduler<br/>(CeleryExecutor)"]
+    API["api-server :8080<br/>(UI · Execution API)"]
+    SC["scheduler (CeleryExecutor)"]
+    DP["dag-processor"]
+    TR["triggerer"]
     PG[("PostgreSQL :5432<br/>메타DB · pg_hba 워커CIDR 허용")]
     RD[("Redis :6379<br/>브로커 · requirepass")]
   end
 
   subgraph WK["celery workers"]
     direction TB
-    W1["worker<br/>192.168.0.2"]
-    W2["worker<br/>192.168.0.3"]
-    W3["worker<br/>192.168.0.4"]
+    W1["worker 192.168.0.2 :8793"]
+    W2["worker 192.168.0.3 :8793"]
+    W3["worker 192.168.0.4 :8793"]
   end
 
-  User -->|":8080"| WS
-  WS --- PG
-  SC --- PG
+  User -->|":8080"| API
   SC -->|"태스크 enqueue"| RD
-  RD -->|"consume"| W1
-  RD -->|"consume"| W2
-  RD -->|"consume"| W3
-  W1 -->|"상태/결과"| PG
-  W2 -->|"상태/결과"| PG
-  W3 -->|"상태/결과"| PG
+  RD -->|"consume :6379"| W1
+  RD -->|"consume :6379"| W2
+  RD -->|"consume :6379"| W3
+  W1 -->|"태스크 실행 :8080/execution/"| API
+  W2 -->|"태스크 실행 :8080/execution/"| API
+  W3 -->|"태스크 실행 :8080/execution/"| API
+  W1 -.->|"celery 결과 :5432"| PG
+  W2 -.->|"celery 결과 :5432"| PG
+  W3 -.->|"celery 결과 :5432"| PG
 ```
 
-> 별도 DB 노드를 두거나 관리형 PostgreSQL을 쓰려면 `DB_MODE=external`로 스왑 (DESIGN §12.4).
+> 별도 DB 노드를 두거나 관리형 PostgreSQL을 쓰려면 `DB_MODE=external`로 스왑.
 > 워커는 `ROLE=worker` 로 설치 시 로컬 DB/Redis를 설치하지 않고 control에 접속만 한다.
+> 공유 비밀에 fernet/secret 외에 **`AF_JWT_SECRET`** 이 추가됨(전 노드 동일 필수).
 
 ---
 
@@ -129,24 +148,27 @@ flowchart TB
 
 ### 빌드 (인터넷 빌드머신)
 ```bash
-./build/build-wheelhouse-docker.sh   # wheelhouse 생성 (docker, ubi9/python-39)
-#   또는  ./build/build-wheelhouse-rhel.sh   # RHEL 9.4 네이티브(docker 불필요)
+./build/build-wheelhouse-docker.sh   # wheelhouse 생성 (docker, ubi9/python-311)
+#   또는  ./build/build-wheelhouse-rhel.sh   # RHEL 9 네이티브(docker 불필요, python3.11)
 ./build/extract-rpms-docker.sh       # (선택) OS RPM 추출 — 완전 오프라인 설치용 (또는 -rhel.sh)
-./build/package.sh                   # dist/airflow-2.11.0-airgap-bundle.tar.gz 생성
+./build/package.sh                   # dist/airflow-3.3.0-airgap-bundle.tar.gz 생성
 ```
 
 ### Phase 1 설치 (대상 서버)
 ```bash
 mkdir -p /opt/airflow-install
-tar xzf airflow-2.11.0-airgap-bundle.tar.gz -C /opt/airflow-install --strip-components=1
+tar xzf airflow-3.3.0-airgap-bundle.tar.gz -C /opt/airflow-install --strip-components=1
 cd /opt/airflow-install
 PG_PASSWORD=*** AF_ADMIN_PASSWORD=*** ./install/install-all.sh
-#   OS 패키지를 번들 RPM(미러 불필요)으로 설치하려면:  RPM_SOURCE=bundle 추가
+#   OS 패키지 소스 선택:  RPM_SOURCE=mirror(기본) | bundle(번들 RPM) | system(서버 기존 repo)
 ```
+
+설치 후 확인: `curl http://127.0.0.1:8080/api/v2/monitor/health` (4개 컴포넌트 healthy),
+UI `http://<server>:8080` (admin 로그인).
 
 ### Phase 2 설치
 ```bash
-# 0) 공유 구성 1회 생성
+# 0) 공유 구성 1회 생성 (fernet/secret/jwt/비번 포함)
 ./install/gen-cluster-keys.sh ./cluster.env 192.168.0.1 192.168.0.0/24
 
 # 모드 A (SSH 가능)
@@ -159,7 +181,8 @@ CONTROL_IP=192.168.0.1 WORKER_IPS="192.168.0.2 192.168.0.3 192.168.0.4" \
 ```
 
 주요 변수(전체는 `install/env.sh`): `INSTALL_ROOT`(설치경로), `AIRFLOW_USER`/`CREATE_USER`(계정),
-`DB_MODE`(local|external), `ROLE`(control|worker), `CONTROL_IP`, `REDIS_PASSWORD`, `OPEN_FIREWALL`.
+`RPM_SOURCE`(mirror|bundle|system), `DB_MODE`(local|external), `ROLE`(control|worker),
+`CONTROL_IP`, `REDIS_PASSWORD`, `AF_JWT_SECRET`, `OPEN_FIREWALL`.
 
 ---
 
@@ -172,3 +195,17 @@ install/  00~06 · install-all.sh · env.sh           # 대상 설치 (오프라
 deploy/   deploy-cluster.sh · print-node-commands.sh # Phase2 배포 (모드 A/B)
 DESIGN.md                                            # 설계서 + AS-BUILT
 ```
+
+## 7. Airflow 2.11 → 3.3 주요 변경 요약 (이 저장소 관점)
+
+| 항목 | 2.11 (구) | 3.3.0 (현재) |
+|---|---|---|
+| Python | 시스템 3.9 | AppStream python3.11 (venv) |
+| 서비스 | webserver, scheduler | api-server, scheduler, dag-processor, triggerer |
+| UI/REST | Flask(FAB) :8080 | FastAPI api-server :8080 (REST v2: `/api/v2`) |
+| 인증 | FAB 내장 | `[core] auth_manager = FabAuthManager` (fab provider) |
+| 공유 비밀 | fernet, secret | fernet, secret + **JWT secret** |
+| 워커→DB | 직접 접속 | Task Execution API(:8080) 경유, celery 결과만 DB |
+| health | `/health` | `/api/v2/monitor/health` |
+| extras | `hdfs`, `password` | `apache-hdfs`(개명), `password` 삭제, `fab`/`standard` 추가 |
+| DAG 작성 | `schedule_interval`, SubDAG 허용 | 제거됨 — `schedule` 사용, SubDAG→TaskGroup |

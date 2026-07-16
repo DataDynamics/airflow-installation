@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# Airflow 2.11 airgap wheelhouse 빌드 (오케스트레이터: 인터넷+docker 필요)
-# RHEL9 ABI / Python 3.9 호환 wheel을 ubi9/python-39 컨테이너에서 생성.
+# Airflow 3.x airgap wheelhouse 빌드 (오케스트레이터: 인터넷+docker 필요)
+# RHEL9 ABI / Python 3.11 호환 wheel을 ubi9/python-311 컨테이너에서 생성.
 #
 set -euo pipefail
 
-AF_VERSION="${AF_VERSION:-2.11.0}"
-PY_TAG="3.9"
-EXTRAS="${EXTRAS:-celery,postgres,redis,common-sql,ssh,apache-kafka,sftp,ftp,hdfs,samba,pandas,uv,async,password,ldap}"
-IMAGE="registry.access.redhat.com/ubi9/python-39:latest"
+AF_VERSION="${AF_VERSION:-3.3.0}"
+PY_TAG="3.11"
+EXTRAS="${EXTRAS:-celery,postgres,redis,fab,standard,common-sql,ssh,apache-kafka,sftp,ftp,apache-hdfs,samba,pandas,uv,async,ldap}"
+IMAGE="registry.access.redhat.com/ubi9/python-311:latest"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${REPO_ROOT}/artifacts"
@@ -34,6 +34,11 @@ docker run --rm -u 0 -v "${OUT}:/out" "${IMAGE}" bash -lc "
   echo '--- airflow + 의존성 전체를 wheel로 빌드/수집 ---'
   python -m pip wheel 'apache-airflow[${EXTRAS}]==${AF_VERSION}' \
     -c /out/constraints-${PY_TAG}.txt -w /out/wheelhouse
+
+  echo '--- 패치버전 조건부 의존성 보충 ---'
+  # redis-py: async-timeout 은 python_full_version<3.11.3 에서만 필요.
+  # 빌드 컨테이너(3.11.9+)에선 수집 안 되지만 대상(RHEL 9.2 python 3.11.2)에선 필요.
+  python -m pip download -d /out/wheelhouse -c /out/constraints-${PY_TAG}.txt async-timeout
 "
 
 echo ">> wheel 개수: $(ls -1 "${WH}"/*.whl 2>/dev/null | wc -l)"

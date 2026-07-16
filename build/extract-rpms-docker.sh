@@ -8,7 +8,7 @@
 set -euo pipefail
 
 RHEL_REPO_BASE="${RHEL_REPO_BASE:-http://10.0.1.102/rhel-9.4}"
-IMAGE="registry.access.redhat.com/ubi9/python-39:latest"
+IMAGE="registry.access.redhat.com/ubi9/python-311:latest"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${REPO_ROOT}/artifacts/rpms"
 PKG_LIST="${REPO_ROOT}/build/os-packages.list"

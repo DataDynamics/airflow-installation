@@ -5,8 +5,8 @@ set -euo pipefail
 source "$(dirname "$0")/env.sh"
 
 echo ">> 서비스 중지/비활성"
-systemctl disable --now airflow-webserver airflow-scheduler airflow-worker 2>/dev/null || true
-rm -f /etc/systemd/system/airflow-{webserver,scheduler,worker}.service /etc/systemd/system/airflow.env
+systemctl disable --now airflow-api-server airflow-scheduler airflow-dag-processor airflow-triggerer airflow-worker airflow-flower 2>/dev/null || true
+rm -f /etc/systemd/system/airflow-{api-server,scheduler,dag-processor,triggerer,worker,flower}.service /etc/systemd/system/airflow.env
 systemctl daemon-reload || true
 
 if [ "${DB_MODE}" = "local" ]; then

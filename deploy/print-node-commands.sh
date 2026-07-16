@@ -4,7 +4,7 @@
 # 각 노드에 들어가서 복붙할 '명령 시트'를 출력한다. (실행하지 않고 안내만)
 # 사용: CONTROL_IP=192.168.0.1 WORKER_IPS="192.168.0.2 192.168.0.3 192.168.0.4" ./deploy/print-node-commands.sh
 set -euo pipefail
-AIRFLOW_VERSION="${AIRFLOW_VERSION:-2.11.0}"
+AIRFLOW_VERSION="${AIRFLOW_VERSION:-3.3.0}"
 BUNDLE="airflow-${AIRFLOW_VERSION}-airgap-bundle.tar.gz"
 CONTROL_IP="${CONTROL_IP:-192.168.0.1}"
 WORKER_IPS="${WORKER_IPS:-192.168.0.2 192.168.0.3 192.168.0.4}"
@@ -30,8 +30,8 @@ cat <<EOF
 ----------------------------------------------------------------
     sudo bash -c 'set -a; source ./cluster.env; set +a; ROLE=control ./install/install-all.sh'
     # 확인:
-    curl -s http://127.0.0.1:8080/health; echo
-    # webserver+scheduler+PostgreSQL(메타DB)+Redis(브로커) 가 이 노드에 구성됨
+    curl -s http://127.0.0.1:8080/api/v2/monitor/health; echo
+    # api-server+scheduler+dag-processor+triggerer+PostgreSQL(메타DB)+Redis(브로커) 가 이 노드에 구성됨
 EOF
 
 i=1

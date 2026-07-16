@@ -1,533 +1,318 @@
-# Apache Airflow 2.11 Airgap 설치 설계서
+# Apache Airflow 3.3.0 Airgap 설치 설계서
 
-> 대상: RHEL 9.4 / 192.168.122.62 (airgap)
-> 작성일: 2026-06-26
+> 대상: RHEL 9.x airgap / 테스트 검증 노드 192.168.122.191 (RHEL 9.2)
+> 최초 작성: 2026-06-26 (Airflow 2.11) · **2026-07-16 Airflow 3.3.0 개편**
+
+---
+
+## 0. 2.11 → 3.3.0 개편 배경과 핵심 변경
+
+| 축 | 2.11 설계 (구) | 3.3.0 설계 (현재) | 이유 |
+|---|---|---|---|
+| Python | 시스템 python3 (3.9) | **AppStream `python3.11`** RPM | Airflow 3.2부터 Python 3.9 지원 제거(3.10~3.14만 지원) |
+| constraints | constraints-3.9.txt | **constraints-3.11.txt** | 위와 동일 |
+| 빌드 이미지 | ubi9/python-39 | **ubi9/python-311** | ABI 정합 |
+| 서비스 | webserver·scheduler (2개) | **api-server·scheduler·dag-processor·triggerer (4개)** | 3.x 아키텍처: webserver→FastAPI api-server, dag-processor 필수 분리 |
+| 인증 | FAB 내장 | `[core] auth_manager` = **FabAuthManager** (`fab` provider) | 3.x 기본 SimpleAuthManager는 운영 사용자 관리에 부적합 |
+| 공유 비밀 | fernet + secret | fernet + secret + **JWT secret** (`[api_auth] jwt_secret`) | Execution API/UI 토큰 서명. 전 노드 동일 필수 |
+| 태스크→DB | 태스크가 메타DB 직접 접속 | **Task Execution API(:8080/execution/) 경유** | 3.x Task SDK 구조. 워커의 DB 직접 의존 제거 |
+| EXTRAS | `…,hdfs,…,password,ldap` | `hdfs`→**`apache-hdfs`**, `password` **삭제**(FAB에 통합), **`fab`,`standard` 추가** | 3.3.0 PyPI extras 실측 검증 |
+| health | `/health` | **`/api/v2/monitor/health`** | REST v2 |
+| DAG 작성 | `schedule_interval`, SubDAG | `schedule`, TaskGroup (SubDAG 제거) | 3.0 breaking changes |
+
+파이프라인 골격(wheelhouse → package → 단일 번들 → install-all.sh)과
+유연 구성 축(`INSTALL_ROOT`/`AIRFLOW_USER`/`DB_MODE`/`ROLE`)은 2.11 설계를 그대로 유지한다.
 
 ---
 
 ## 1. 확정된 전제 (실측 기반)
 
-### 1.1 대상 서버 (192.168.122.62) — 실측값
+### 1.1 테스트 검증 노드 (192.168.122.191) — 실측값 (2026-07-16)
 | 항목 | 값 |
 |---|---|
-| OS | Red Hat Enterprise Linux 9.4 (Plow), x86_64 |
+| OS | Red Hat Enterprise Linux **9.2** (Plow), x86_64 |
 | CPU / MEM | 2 vCPU / 7.5 GiB |
-| Disk | `/` 44 GB (40 GB 여유) |
-| 시스템 Python | 3.9.18 (`/usr/bin/python3`) |
+| Disk | `/` 44 GB (31 GB 여유) |
+| 시스템 Python | 3.9.16 — **사용 안 함**. AppStream에 `python3.11`(3.11.2) 존재 |
 | SELinux | **Enforcing** |
-| 인터넷 | 차단됨 (airgap 확인) |
-| `/etc/yum.repos.d/` | 비어 있음 → repo 등록 필요 |
+| dnf repo | DVD ISO 로컬 repo(rhel-9.2-baseos/appstream) 구성됨 → **`RPM_SOURCE=system`** 사용 |
+| 접속 | ssh `fharenheit`, `sudo su -` 로 root 전환 |
 
-### 1.2 RHEL 패키지 저장소 (실측)
-- 호스트: `http://10.0.1.102/` (Synology DSM 웹서버)
-- 서브트리(둘 다 repodata 200 OK):
-  - `http://10.0.1.102/rhel-9.4/BaseOS/`
-  - `http://10.0.1.102/rhel-9.4/AppStream/`
-- 디렉터리 인덱싱은 비활성(403)이지만 yum repodata 접근은 정상.
+> 운영 airgap 대상은 RHEL 9.4 + 사내 미러(`http://10.0.1.102/rhel-9.4/`) 전제 유지.
+> python3.11은 RHEL 9.0+ AppStream 공통 제공이라 9.2/9.4 모두 동일 방식.
+> (python3.12는 RHEL 9.4부터라 채택하지 않음 — 9.2 노드 호환 위해 3.11로 통일)
 
-### 1.3 결정 사항 (사용자 확정)
+### 1.2 Airflow 3.3.0 요구사항 (공식 문서 확인)
+- Python **3.10 ~ 3.14** (`requires_python: >=3.10,!=3.15`)
+- 메타DB: PostgreSQL **13~17** / MySQL 8.0. RHEL 9 AppStream 기본 postgresql 모듈(13)로 충족
+  (PG13은 2025-11 업스트림 EOL — 운영은 `dnf module enable postgresql:15` 권장, §7.5)
+- constraints: `constraints-3.3.0/constraints-3.11.txt` (존재/프로바이더 핀 확인:
+  celery 3.21.0 · postgres 6.8.0 · redis 4.5.0 · fab 3.7.1 · ssh 5.0.3 · sftp 5.8.2 ·
+  apache-kafka 1.14.0 · apache-hdfs 4.12.1 · samba 4.12.6 · standard 1.15.0)
+
+### 1.3 결정 사항
 | 항목 | 선택 |
 |---|---|
-| Airflow 버전 | **2.11.x** (2.x 최신) |
-| Python 런타임 | **시스템 Python 3.9** |
+| Airflow 버전 | **3.3.0** |
+| Python 런타임 | **AppStream python3.11** (시스템 python3는 불변) |
 | 메타DB / 브로커 | **PostgreSQL + Redis** |
-| 빌드머신 | 별도 없음 → **오케스트레이터(Ubuntu+docker+인터넷)에서 컨테이너로 wheel 생성** |
-
-### 1.4 빌드 환경 (실측)
-- 본 작업 머신: Ubuntu 24.04 / x86_64 / **인터넷 가능** / **docker 사용 가능**
-- 10.0.1.102 도달 가능 → 산출물 배포 경로로도 활용 가능.
+| 인증 | **FabAuthManager** (2.x와 동일한 사용자/역할 모델, `airflow users create` 유지) |
+| 빌드머신 | 오케스트레이터(Ubuntu+docker+인터넷)에서 **ubi9/python-311** 컨테이너로 wheel 생성 |
 
 ---
 
 ## 2. 토폴로지 설계
 
-### Phase 1 — 단일 노드 (현재 목표)
-모든 컴포넌트를 192.168.122.62 한 대에 설치. **Executor = LocalExecutor**.
+### Phase 1 — 단일 노드 (LocalExecutor)
+모든 컴포넌트를 한 노드에 설치. 3.x는 **4개 서비스**가 기본이며, LocalExecutor여도
+태스크 실행이 api-server의 Execution API를 경유하므로 **api-server가 죽으면 태스크도 실패**한다.
 
 ```mermaid
 flowchart TB
   User(["운영자 브라우저"])
-  subgraph N["단일 노드 192.168.122.62"]
+  subgraph N["단일 노드 (테스트: 192.168.122.191)"]
     direction TB
-    WS["airflow webserver (gunicorn :8080)"]
-    SC["airflow scheduler<br/>(LocalExecutor — 프로세스 내 병렬)"]
-    PG[("PostgreSQL :5432<br/>메타DB · localhost")]
-    RD[("Redis :6379<br/>Phase2 대비 설치만 · localhost")]
-    WS --- PG
+    API["airflow api-server :8080<br/>(uvicorn · UI + REST v2 + Execution API)"]
+    SC["airflow scheduler (LocalExecutor)"]
+    DP["airflow dag-processor<br/>(DAG 파싱 전담, 3.x 필수)"]
+    TR["airflow triggerer<br/>(deferrable 태스크)"]
+    PG[("PostgreSQL :5432 메타DB")]
+    RD[("Redis :6379 — Phase2 대비 설치만")]
+    API --- PG
     SC --- PG
+    DP --- PG
+    TR --- PG
+    SC -->|"태스크 supervisor가<br/>:8080/execution/ 호출"| API
   end
-  User -->|":8080"| WS
+  User -->|":8080"| API
 ```
-- 단일 노드에서는 Celery/Redis가 필수 아님. **하지만 Phase 2 무중단 확장을 위해 Redis는 설치만 해두고**, airflow.cfg는 LocalExecutor로 시작.
 
-### Phase 2 — 1 web/scheduler + 3 celery worker (확장 시)
-**Executor = CeleryExecutor** 로 전환. 메타DB/브로커는 컨트롤 노드에 두고 워커가 원격 접속.
+### Phase 2 — 1 control + 3 celery worker (확장 시)
+**Executor = CeleryExecutor**. 3.x에서 워커의 통신 대상이 달라진 것이 최대 변경점:
+
+| 워커가 바라보는 것 | 2.11 | 3.3.0 |
+|---|---|---|
+| 브로커(Redis) :6379 | ✔ | ✔ |
+| 메타DB :5432 | ✔ (태스크가 직접 ORM 접속) | celery **result backend 용도만** |
+| control :8080 | ✖ | ✔ **Execution API** (태스크 상태/XCom/Variable/Connection 모두 이 경로) |
+| 로그 서빙 | 워커 :8793 개방 | 동일 (워커 :8793) |
 
 ```mermaid
 flowchart TB
-  subgraph C["Control 노드 (web)"]
+  subgraph C["Control 노드 (192.168.0.1)"]
     direction TB
-    WS["webserver :8080"]
+    API["api-server :8080 (UI · Execution API)"]
     SC["scheduler (CeleryExecutor)"]
-    PG[("PostgreSQL :5432<br/>워커에 개방")]
-    RD[("Redis :6379<br/>워커에 개방")]
+    DP["dag-processor"]
+    TR["triggerer"]
+    PG[("PostgreSQL :5432<br/>워커 CIDR 개방")]
+    RD[("Redis :6379<br/>requirepass · 워커 개방")]
     FL["flower :5555 (선택)"]
   end
-  subgraph WK["celery workers"]
+  subgraph WK["celery workers (192.168.0.2~4)"]
     direction TB
-    W1["worker1"]
-    W2["worker2"]
-    W3["worker3"]
+    W1["worker1 :8793"]
+    W2["worker2 :8793"]
+    W3["worker3 :8793"]
   end
   SC -->|enqueue| RD
   RD -->|consume| W1
   RD -->|consume| W2
   RD -->|consume| W3
-  W1 -->|상태/결과| PG
-  W2 -->|상태/결과| PG
-  W3 -->|상태/결과| PG
+  W1 -->|"Execution API :8080"| API
+  W2 -->|"Execution API :8080"| API
+  W3 -->|"Execution API :8080"| API
+  W1 -.->|"celery 결과 :5432"| PG
+  W2 -.->|"celery 결과 :5432"| PG
+  W3 -.->|"celery 결과 :5432"| PG
 ```
-전환 시 변경점은 §8 참조 (executor, broker_url, result_backend, DB/Redis bind 주소, 방화벽).
+
+**Phase 2 포트 매트릭스 (firewalld):**
+
+| 방향 | 포트 | 용도 |
+|---|---|---|
+| worker → control | 6379/tcp | Celery 브로커 |
+| worker → control | 8080/tcp | **Task Execution API (3.x 신규 필수)** |
+| worker → control | 5432/tcp | Celery result backend |
+| control(UI) → worker | 8793/tcp | 태스크 로그 조회 |
+| 운영자 → control | 8080/tcp | UI/REST |
+
+`OPEN_FIREWALL=true`(control)가 5432/6379/8080을 개방한다(2.11과 동일 — 8080은 원래 개방 대상).
 
 ---
 
-## 3. 설치 디렉터리 / 계정 표준
+## 3. 설치 디렉터리 / 계정 표준 (2.11과 동일)
 
 | 항목 | 값 |
 |---|---|
 | 서비스 계정 | `airflow` (시스템 계정, nologin) |
 | AIRFLOW_HOME | `/opt/airflow` |
-| Python venv | `/opt/airflow/venv` (시스템 py3.9 기반) |
-| DAGs | `/opt/airflow/dags` |
-| Logs | `/opt/airflow/logs` |
-| Plugins | `/opt/airflow/plugins` |
-| 설정 | `/opt/airflow/airflow.cfg` |
-| 배포 산출물 적재 | `/opt/airflow-install/` (wheelhouse, rpm 등) |
-| PostgreSQL data | `/var/lib/pgsql/data` (기본 경로 — SELinux 컨텍스트 정합 유지) |
+| Python venv | `/opt/airflow/venv` (**python3.11** 기반) |
+| DAGs / Logs / Plugins | `/opt/airflow/{dags,logs,plugins}` |
+| 설정 / 비밀 | `/opt/airflow/airflow.cfg`(640) / `/opt/airflow/airflow-secrets.env`(600) |
+| 배포 산출물 적재 | `/opt/airflow-install/` |
+| PostgreSQL data | `/var/lib/pgsql/data` (기본 경로 — SELinux 정합 유지) |
+
+`INSTALL_ROOT`/`AIRFLOW_USER`/`CREATE_USER`/`DB_MODE` 파라미터화(§12)는 그대로 유효.
 
 ---
 
 ## 4. 패키지 인벤토리
 
-### 4.1 OS 패키지 (RHEL repo: BaseOS/AppStream에서 dnf 설치)
-airgap 대상은 repo가 사내에 있으므로 **dnf로 직접 설치**(별도 RPM 반출 불필요).
+### 4.1 OS 패키지
+- 런타임: **`python3.11` `python3.11-pip` `python3.11-devel`** gcc gcc-c++ make
+- DB: `libpq` `libpq-devel` (+local 모드: `postgresql-server` `postgresql-contrib`)
+- 브로커: `redis` / 보조: tar gzip which procps-ng policycoreutils-python-utils
+- ldap/kerberos 런타임: `openldap` `cyrus-sasl-lib` `krb5-libs`
 
-핵심 목록:
-- 런타임/빌드: `python3` `python3-pip` `python3-devel` `gcc` `gcc-c++` `make`
-- DB 클라이언트 빌드용: `libpq` `libpq-devel` (psycopg2 빌드/실행)
-- DB 서버: `postgresql-server` `postgresql-contrib`
-- 브로커: `redis`
-- 보조: `tar` `gzip` `which` `procps-ng` `policycoreutils-python-utils`(SELinux 관리) `firewalld`(선택)
+`RPM_SOURCE` 3모드: `mirror`(사내 미러 dnf) / `bundle`(번들 로컬 repo, 완전 오프라인) /
+**`system`(신규)** — 대상 서버에 이미 구성된 repo(DVD ISO 등)를 그대로 사용, repo 등록 생략.
 
-> 비고: wheel을 컨테이너에서 **완전 바이너리(wheel)** 로 빌드하므로 대상에서 컴파일이 필요 없도록 설계. 단 안전망으로 `gcc`/`*-devel` 은 설치해 둠.
-
-> **Python 3.9는 RHEL 9.4 기본 제공** → 별도 빌드/패키징하지 않고 시스템 `python3` 를 그대로 사용.
-> **OS 패키지(RPM) 두 경로** (`RPM_SOURCE`):
-> - `mirror`(기본): 설치 시 사내 미러(10.0.1.102)에서 `dnf`. target 이 미러에 접근 가능할 때.
-> - `bundle`: `build/extract-rpms-*.sh` 가 `os-packages.list` + **전체 의존성**을 미러에서 추출(`dnf download --resolve --alldeps` + `createrepo_c`)해 `artifacts/rpms` 로컬 repo 생성 → 번들에 포함 → target 이 **미러 없이 완전 오프라인**(`file://` 로컬 repo)으로 설치. (검증: `--network none` 컨테이너에서 266 RPM 로컬 repo만으로 설치 성공)
-
-### 4.2 Python 패키지 (wheelhouse — 컨테이너에서 생성)
-- 설치 extras(`EXTRAS`, 빌드·설치 동일):
-  `celery,postgres,redis,common-sql,ssh,apache-kafka,sftp,ftp,hdfs,samba,pandas,uv,async,password,ldap`
-  → `apache-airflow[<EXTRAS>]==2.11.0`
-- **extra는 빌드 시점에 고정**: wheelhouse에 wheel이 있어야 오프라인 설치 가능. extra 추가 시 wheelhouse 재빌드 필요(`build-wheelhouse-*.sh`와 `install/env.sh`의 `EXTRAS` 일치).
-- **빌드 의존성 주의**: `ldap`(python-ldap)은 manylinux wheel이 없어 빌드 시 `openldap-devel`/`cyrus-sasl-devel` 헤더 필요(빌드 컨테이너/머신에 설치). 런타임 라이브러리(`openldap`,`cyrus-sasl-lib`)는 OS 패키지 목록에 포함.
-- 제약: 공식 constraints `constraints-2.11.0/constraints-3.9.txt`
-- 부트스트랩 포함: `pip` `setuptools` `wheel` (대상 venv용, 오프라인)
+### 4.2 Python 패키지 (wheelhouse)
+- EXTRAS(빌드·설치 동일, 3.3.0 PyPI 실측 검증):
+  `celery,postgres,redis,fab,standard,common-sql,ssh,apache-kafka,sftp,ftp,apache-hdfs,samba,pandas,uv,async,ldap`
+  - 2.11 대비: `hdfs`→`apache-hdfs` 개명, `password` extra 삭제(비밀번호 인증은 `fab`에 포함),
+    `fab`(FabAuthManager+로그인 UI), `standard`(Bash/Python 오퍼레이터 등 기본 프로바이더) 추가
+- **extra는 빌드 시점 고정** — 추가 시 wheelhouse 재빌드(`build-wheelhouse-*.sh`와 `install/env.sh` 일치 유지)
+- `ldap`(python-ldap)은 sdist → 빌드 컨테이너에 `openldap-devel`/`cyrus-sasl-devel`/`krb5-devel` 필요(반영됨)
+- constraints: `constraints-3.3.0/constraints-3.11.txt` / 부트스트랩 `pip setuptools wheel` 동봉
 
 ---
 
-## 5. 빌드 단계 (빌드머신: 인터넷 필요)
+## 5~6. 빌드 / 전송 (2.11과 동일 구조)
 
-목표: RHEL9 ABI/Python3.9 와 **완전히 호환되는 wheel 묶음** 생성. 두 가지 빌드 변형 제공(택1, 동일 산출물):
-- **`build/build-wheelhouse-docker.sh`** — docker 되는 아무 OS(Ubuntu 등)에서 `registry.access.redhat.com/ubi9/python-39` 컨테이너로 빌드(RHEL9 glibc/Python3.9 동일).
-- **`build/build-wheelhouse-rhel.sh`** — RHEL 9.4(또는 Rocky/Alma 9) 빌드머신에서 **시스템 python3.9로 네이티브 빌드**(docker 불필요, 임시 venv 격리). 대상과 동일 OS라 가장 정합.
-
-아래 5.1은 docker 변형의 핵심 로직(네이티브 변형도 동일하게 `pip wheel`로 수집).
-
-### 5.1 wheelhouse 생성
 ```bash
-# 오케스트레이터에서 실행 (인터넷 필요)
-mkdir -p ./artifacts/wheelhouse
-AF=2.11.0; PY=3.9
-CONSTRAINTS="https://raw.githubusercontent.com/apache/airflow/constraints-${AF}/constraints-${PY}.txt"
+# 빌드 (인터넷 빌드머신)
+./build/build-wheelhouse-docker.sh    # ubi9/python-311 컨테이너, constraints-3.11
+./build/extract-rpms-docker.sh        # (선택) 완전 오프라인용 RPM 추출
+./build/package.sh                    # dist/airflow-3.3.0-airgap-bundle.tar.gz
 
-docker run --rm -v "$PWD/artifacts/wheelhouse:/wh" \
-  registry.access.redhat.com/ubi9/python-39 bash -lc "
-    set -e
-    pip install --upgrade pip wheel
-    # 부트스트랩 도구도 오프라인 설치용으로 함께 수집
-    pip download -d /wh pip setuptools wheel
-    # airflow + extras 전체를 '바이너리 wheel'로 빌드/수집
-    pip wheel 'apache-airflow[celery,postgres,redis]==${AF}' \
-      -c '${CONSTRAINTS}' -w /wh
-  "
-# constraints 파일도 함께 보관
-curl -fsSL "$CONSTRAINTS" -o ./artifacts/constraints-${PY}.txt
-```
-산출물: `./artifacts/wheelhouse/*.whl` + `constraints-3.9.txt`
-
-### 5.2 산출물 패키징
-```bash
-tar czf airflow-2.11-py39-airgap.tar.gz -C ./artifacts .
-sha256sum airflow-2.11-py39-airgap.tar.gz > airflow-2.11-py39-airgap.tar.gz.sha256
+# 전송
+scp dist/airflow-3.3.0-airgap-bundle.tar.gz* <user>@<target>:/tmp/
+# 대상: sha256 검증 → /opt/airflow-install 에 해제
 ```
 
 ---
 
-## 6. 전송 단계
+## 7. 설치 단계 (install-all.sh가 자동 수행)
 
-```bash
-# 오케스트레이터 → 대상
-scp airflow-2.11-py39-airgap.tar.gz* root@192.168.122.62:/opt/airflow-install/
-# 대상에서 검증/해제
-ssh root@192.168.122.62 '
-  cd /opt/airflow-install && sha256sum -c airflow-2.11-py39-airgap.tar.gz.sha256 &&
-  tar xzf airflow-2.11-py39-airgap.tar.gz'
-```
+00-repo(RPM_SOURCE 분기) → 01-os-packages(**python3.11**) → 06-selinux →
+02-venv(**python3.11 -m venv**) → 03/03b-postgres → 04-redis → **05-airflow-init**.
 
----
+### 7.5 PostgreSQL
+RHEL 9 AppStream 기본 모듈은 PG13 (Airflow 3.3 지원 범위 내, 단 업스트림 EOL 2025-11).
+운영에서 15를 쓰려면 01 이전에: `dnf module enable -y postgresql:15`. 스크립트는 모듈 버전에 무관.
 
-## 7. 설치 단계 (대상 192.168.122.62)
-
-### 7.1 RHEL repo 등록
-`/etc/yum.repos.d/local-rhel94.repo`:
+### 7.7 airflow.cfg (3.3.0 섹션 구조 — 05가 렌더링)
 ```ini
-[local-baseos]
-name=RHEL 9.4 BaseOS (local)
-baseurl=http://10.0.1.102/rhel-9.4/BaseOS/
-enabled=1
-gpgcheck=0
-
-[local-appstream]
-name=RHEL 9.4 AppStream (local)
-baseurl=http://10.0.1.102/rhel-9.4/AppStream/
-enabled=1
-gpgcheck=0
+[core]        executor / auth_manager=FabAuthManager / dags_folder / default_timezone(KST)
+              parallelism / max_active_* / execution_api_server_url = http://<CONTROL_IP>:8080/execution/
+[database]    풀 설정(sql_alchemy_pool_*) — sql_alchemy_conn 은 비밀이라 env로만
+[scheduler]   scheduler_heartbeat_sec / catchup_by_default / max_tis_per_query
+[dag_processor]  parsing_processes / min_file_process_interval / refresh_interval
+                 / dag_file_processor_timeout   ← 2.x [scheduler]에서 이동
+[celery]      worker_concurrency
+[logging]     base_log_folder / logging_level
+[api]         port / workers / worker_timeout / expose_config / expose_stacktrace / instance_name
+              ← 2.x [webserver] 대체. host 기본 0.0.0.0
 ```
-> `gpgcheck=0` 은 사내 미러 신뢰 전제. GPG 키가 미러에 있으면 `gpgcheck=1`+`gpgkey=` 권장.
-검증: `dnf clean all && dnf repolist && dnf makecache`
+2.x 전용이라 **삭제된 설정**: `[webserver] navbar_color·expose_hostname·warn_deployment_exposure·
+worker_class(gunicorn)`, `[api] auth_backends`, UI 타임존(3.x는 사용자별 UI 설정).
 
-### 7.2 OS 패키지 설치
-```bash
-dnf -y install python3 python3-pip python3-devel gcc gcc-c++ make \
-  libpq libpq-devel postgresql-server postgresql-contrib redis \
-  policycoreutils-python-utils tar gzip which procps-ng
+### 7.8 비밀 파일 (airflow-secrets.env, 600)
 ```
-
-### 7.3 서비스 계정/디렉터리
-```bash
-useradd --system --home-dir /opt/airflow --shell /sbin/nologin airflow || true
-mkdir -p /opt/airflow/{dags,logs,plugins}
-chown -R airflow:airflow /opt/airflow
+AIRFLOW__DATABASE__SQL_ALCHEMY_CONN   # postgresql+psycopg2://…
+AIRFLOW__CORE__FERNET_KEY
+AIRFLOW__API__SECRET_KEY              # 2.x AIRFLOW__WEBSERVER__SECRET_KEY 대체
+AIRFLOW__API_AUTH__JWT_SECRET         # 3.x 신규 — 전 노드 동일 필수
+AIRFLOW__CELERY__BROKER_URL
+AIRFLOW__CELERY__RESULT_BACKEND
 ```
+키 영속화 우선순위(주입 > 기존 파일 재사용 > 신규생성), cfg 멱등 백업, `run_af()` 주입 방식은 2.11과 동일.
 
-### 7.4 venv + 오프라인 pip 설치
-```bash
-sudo -u airflow python3 -m venv /opt/airflow/venv
-WH=/opt/airflow-install/wheelhouse
-# 부트스트랩(오프라인)
-sudo -u airflow /opt/airflow/venv/bin/pip install \
-  --no-index --find-links "$WH" --upgrade pip setuptools wheel
-# airflow 본체(오프라인, constraints 적용)
-sudo -u airflow /opt/airflow/venv/bin/pip install \
-  --no-index --find-links "$WH" \
-  -c /opt/airflow-install/constraints-3.9.txt \
-  "apache-airflow[celery,postgres,redis]==2.11.0"
-```
-
-### 7.5 PostgreSQL 초기화
-```bash
-postgresql-setup --initdb           # /var/lib/pgsql/data 생성 (SELinux 정합)
-systemctl enable --now postgresql
-sudo -u postgres psql <<'SQL'
-CREATE ROLE airflow LOGIN PASSWORD 'CHANGE_ME_STRONG';
-CREATE DATABASE airflow OWNER airflow ENCODING 'UTF8';
-GRANT ALL PRIVILEGES ON DATABASE airflow TO airflow;
-SQL
-```
-Phase1은 localhost 접속이라 `pg_hba.conf` 기본(ident/peer→md5) 조정만. Phase2에서 워커 서브넷 개방(§8).
-
-### 7.6 Redis (Phase2 대비, 설치/기동만)
-```bash
-systemctl enable --now redis        # 기본 127.0.0.1:6379
-```
-
-### 7.7 airflow.cfg 핵심 (Phase 1 = LocalExecutor)
-`/opt/airflow/airflow.cfg` (또는 환경변수):
-```ini
-[core]
-executor = LocalExecutor
-dags_folder = /opt/airflow/dags
-load_examples = False
-parallelism = 16
-[database]
-sql_alchemy_conn = postgresql+psycopg2://airflow:CHANGE_ME_STRONG@127.0.0.1:5432/airflow
-[logging]
-base_log_folder = /opt/airflow/logs
-[webserver]
-web_server_port = 8080
-secret_key = <openssl rand -hex 32 로 생성>
-```
-
-### 7.8 DB 마이그레이션 / 관리자 계정
-```bash
-export AIRFLOW_HOME=/opt/airflow
-sudo -u airflow AIRFLOW_HOME=/opt/airflow /opt/airflow/venv/bin/airflow db migrate
-sudo -u airflow AIRFLOW_HOME=/opt/airflow /opt/airflow/venv/bin/airflow users create \
-  --username admin --firstname A --lastname D --role Admin \
-  --email admin@example.com --password CHANGE_ME_ADMIN
-```
-
-### 7.9 systemd 유닛
-`/etc/systemd/system/airflow-webserver.service`, `airflow-scheduler.service`
-(공통: `User=airflow`, `EnvironmentFile`로 `AIRFLOW_HOME=/opt/airflow`,
-`ExecStart=/opt/airflow/venv/bin/airflow webserver|scheduler`).
-```bash
-systemctl daemon-reload
-systemctl enable --now airflow-scheduler airflow-webserver
-```
-
-### 7.10 SELinux / 방화벽
-- SELinux **Enforcing 유지**. 표준 경로(PG 기본 data dir, gunicorn 8080 바인딩)는 추가 정책 불필요.
-  - `/opt/airflow` 하위 접근 문제 발생 시: `semanage fcontext`/`restorecon` 로 컨텍스트 정리(설치 스크립트에 점검 단계 포함).
-- 방화벽(firewalld 사용 시): Phase1은 8080만 개방.
-  ```bash
-  firewall-cmd --permanent --add-port=8080/tcp && firewall-cmd --reload
-  ```
-
----
-
-## 8. Phase 2 — CeleryExecutor (1 web + 3 celery) 설계 [구현 반영]
-
-### 8.0 토폴로지 / IP 계획
-| 역할(`ROLE`) | 노드 | 구성 |
+### 7.9 systemd 유닛 (05가 변수 렌더링)
+| 유닛 | ExecStart | 기동 대상 |
 |---|---|---|
-| `control` | **web 192.168.0.1** | webserver + scheduler + **PostgreSQL(메타DB)** + **Redis(브로커)** (+선택 flower) |
-| `worker` | **celery 192.168.0.2 ~ .4** | celery worker 전용. DB/Redis는 **control(192.168.0.1) 원격 접속**, 로컬 미설치 |
-
-> 별도 DB 노드 가정 없음 → 메타DB/브로커는 web 노드에 동거. 관리형 외부 DB로 바꾸려면 `DB_MODE=external`(§12.4)로 스왑.
-> 모든 노드는 DB/브로커 엔드포인트로 **CONTROL_IP(192.168.0.1)** 를 바라봄(엔드포인트 통일).
-
-### 8.1 역할 모델 (스크립트 자동 분기)
-`ROLE` 한 변수로 전 단계가 갈린다(`env.sh`가 worker면 `DB_MODE=external`,`INSTALL_REDIS=false` 강제).
-
-| 단계 | control | worker |
-|---|---|---|
-| 01 OS패키지 | +postgresql-server, +redis | 클라이언트(libpq)만 |
-| 03 DB | 로컬 PG init + **원격개방** | (03b) control DB **연결검증만** |
-| 04 Redis | bind+requirepass+방화벽 | 스킵 |
-| 05 init | `db migrate`+admin+**web/scheduler 기동** | **migrate 금지**, `db check`+**worker 기동** |
-| 키 | 신규생성 가능 | **control과 동일 키 주입 필수**(없으면 에러) |
-
-### 8.2 control 노드 원격 개방 (env 값으로 활성)
-- PostgreSQL: `listen_addresses='localhost,192.168.0.1'`(restart), `pg_hba` 에 `host airflow airflow <WORKER_CIDR> md5` 추가.
-- Redis: `requirepass`, `bind 127.0.0.1 192.168.0.1`, `protected-mode no`(인증으로 보호).
-- 방화벽(`OPEN_FIREWALL=true`): 5432·6379·8080 개방.
-
-### 8.3 클러스터 시크릿 (키 일치가 핵심)
-- `gen-cluster-keys.sh` 가 **`cluster.env` 1회 생성**: `AF_FERNET_KEY`/`AF_SECRET_KEY`(전 노드 동일), `PG_PASSWORD`/`REDIS_PASSWORD`/`AF_ADMIN_PASSWORD`, `CONTROL_IP`, `PG_ALLOW_CIDR` 등.
-- 이 파일을 **모든 노드에 동일 배포** → fernet 불일치로 인한 Connection 복호화 실패/워커 미동작 방지.
-
-### 8.4 설치 모드 (요청사항: 한번에 vs 각 서버 직접)
-**모드 A — 한번에 (SSH 가능):** `deploy/deploy-cluster.sh`
-- 조정자가 번들+cluster.env를 push, **control 먼저 설치·health 대기 후 워커 순차** 설치.
-- 사용: `CONTROL_IP=192.168.0.1 WORKER_IPS="192.168.0.2 192.168.0.3 192.168.0.4" SSH_USER=root SSH_PASS=*** ./deploy/deploy-cluster.sh`
-
-**모드 B — 각 서버 직접 (SSH 원격실행 불가):** `deploy/print-node-commands.sh` 가 노드별 복붙 명령 출력
-- 각 노드에서 번들 해제 후:
-  - control(먼저): `sudo bash -c 'set -a; source ./cluster.env; set +a; ROLE=control ./install/install-all.sh'`
-  - worker(이후): `… ROLE=worker ./install/install-all.sh`
-- 검증: control에서 `celery … inspect ping` 으로 3워커 응답 확인.
-
-> 공통 제약: **control 선행 → 워커**(스키마는 control이 소유). 두 모드 모두 이 순서를 강제/안내.
-
-### 8.5 운영 주의
-- 전 노드 **시간동기(chrony)**. DAGs 일관성: 시작은 NFS, 운영권장 GitOps/이미지 배포로 `/opt/airflow/dags` 동기.
-- worker 미생성 단계에선 control만 설치해 운영(LocalExecutor 아님, CeleryExecutor지만 워커 0). 워커는 추후 추가만 하면 됨.
+| airflow-api-server | `airflow api-server` | control |
+| airflow-scheduler | `airflow scheduler` | control |
+| airflow-dag-processor | `airflow dag-processor` | control |
+| airflow-triggerer | `airflow triggerer` | control |
+| airflow-worker | `airflow celery worker` | worker |
+| airflow-flower (선택) | `airflow celery flower` | control(ENABLE_FLOWER=true) |
 
 ---
 
-## 9. 검증 체크리스트
-1. `dnf repolist` 에 local-baseos/appstream 정상.
-2. `/opt/airflow/venv/bin/airflow version` → 2.11.0.
-3. `airflow db check` 성공(PostgreSQL 연결).
-4. `systemctl status airflow-scheduler airflow-webserver` active.
-5. 브라우저 `http://192.168.122.62:8080` 로그인.
-6. 예제 DAG 1개 트리거 → 성공(LocalExecutor 실행 확인).
-7. (Phase2) `airflow celery worker` 기동 후 워커에서 태스크 실행 로그 확인.
+## 8. Phase 2 — CeleryExecutor 설계 (3.x 반영)
+
+역할 모델(`ROLE=control|worker`), cluster.env 공유, 모드 A/B 배포는 2.11 설계 유지. 변경점:
+
+1. **cluster.env에 `AF_JWT_SECRET` 추가** (gen-cluster-keys.sh 반영). fernet/secret/jwt 셋 다
+   불일치 시 워커의 Execution API 호출이 401로 실패한다.
+2. 워커 설치 검증에서 `db check` 제거 — 워커는 DB 마이그레이션/직접 접속을 전제하지 않음.
+3. `AF_EXECUTION_API_URL`(기본 `http://${CONTROL_IP}:8080/execution/`)이 cfg에 렌더링됨.
+   워커는 cluster.env의 `CONTROL_IP`로 자동 파생.
+4. 방화벽: control 8080이 **UI뿐 아니라 태스크 실행 경로** — 워커 CIDR에서 반드시 도달 가능해야 함.
 
 ---
 
-## 10. 산출물 구조 (이 저장소)
-```mermaid
-graph LR
-  R["airflow-installation/"]
-  R --> B["build/ — 빌드/추출/패키징 (인터넷·미러)"]
-  R --> I["install/ — 대상 설치 (오프라인)"]
-  R --> D["deploy/ — Phase2 배포(모드 A/B)"]
-  R --> DOC["README.md · DESIGN.md"]
-  R --> ART["artifacts/ · dist/ — 산출물(git 제외)"]
+## 9. 검증 체크리스트 (3.3.0)
 
-  B --> B1["build-wheelhouse-docker.sh / -rhel.sh"]
-  B --> B2["extract-rpms-docker.sh / -rhel.sh"]
-  B --> B3["os-packages.list · package.sh"]
-
-  I --> I1["00-repo · 01-os-packages · 02-venv-offline"]
-  I --> I2["03-postgres · 03b-db-external · 04-redis · 06-selinux"]
-  I --> I3["05-airflow-init · install-all.sh · env.sh"]
-  I --> I4["gen-cluster-keys.sh · 99-teardown.sh"]
-
-  D --> D1["deploy-cluster.sh (모드 A)"]
-  D --> D2["print-node-commands.sh (모드 B)"]
-```
+1. `dnf repolist` 정상 (RPM_SOURCE 모드별).
+2. `/opt/airflow/venv/bin/airflow version` → 3.3.0 / `venv/bin/python -V` → 3.11.x
+3. `systemctl status airflow-api-server airflow-scheduler airflow-dag-processor airflow-triggerer` 모두 active.
+4. `curl http://127.0.0.1:8080/api/v2/monitor/health` → metadatabase/scheduler/dag_processor/triggerer 모두 healthy.
+5. 브라우저 `http://<server>:8080` FAB 로그인(admin).
+6. 테스트 DAG 트리거 → 태스크 SUCCESS (Execution API 경유 실행 확인).
+7. (Phase2) 워커 노드 `systemctl is-active airflow-worker` + control flower/`celery inspect ping`.
 
 ---
 
-## 12. 유연한 구성 — 설치경로 / 실행계정 / DB 외부화 (Phase 1 확장)
+## 10. 산출물 구조 — 2.11과 동일 (README §6 참조)
 
-Phase 2로 가기 전, Phase 1을 **환경변수 파라미터**로 흡수하도록 일반화. 모든 값은
-`install/env.sh`에서 override 가능하며 **기본값은 기존 `/opt`·로컬PG 구성을 그대로 재현**
-(따라서 기존 배포에 재실행해도 동일).
+## 11. 리스크 / 확인 필요
+- **RHEL 9.2 vs 9.4**: 테스트 노드(9.2)와 운영 미러(9.4)의 python3.11 마이너 버전 차이는 ABI 호환(3.11.x).
+  wheelhouse는 cp311 태그라 양쪽 동일 사용 가능.
+- **PG13 EOL**: 운영 전 `postgresql:15` 모듈 전환 권장(§7.5). Airflow 3.3은 13~17 모두 지원.
+- **DAG 마이그레이션**: 2.x DAG 코드는 `schedule_interval`/`SubDagOperator`/`airflow.operators.*` 경로가
+  3.x에서 제거/이동됨. 기존 DAG 이관 시 `airflow.providers.standard.*` 경로와 `schedule` 인자로 수정 필요.
+- **리소스**: 2vCPU/7.5GB 테스트 노드에서 4서비스+PG+Redis 동시 가동 → api workers=2,
+  parsing_processes=2 기본으로 하향(env.sh). 운영 규모에선 상향.
 
-### 12.1 변경 요지 (3개 축)
-| 축 | 파라미터 | 의미 |
-|---|---|---|
-| ① 설치 경로 | `INSTALL_ROOT`(기본 `/opt`) | 별도 디스크 `/app` 등으로 전체 트리 이동. `AIRFLOW_HOME`/`VENV`/`INSTALL_DIR` 모두 파생 |
-| ② 실행 계정 | `AIRFLOW_USER`/`AIRFLOW_GROUP`/`CREATE_USER` | 계정명 변경, **조직이 이미 만든 계정**이면 `CREATE_USER=false`(생성 안 함) |
-| ③ PostgreSQL | `DB_MODE=local\|external` + `PG_*`/`PG_SSLMODE`/`PG_ADMIN_*` | 로컬 직접 구성 vs **서비스로 제공되는 외부 PostgreSQL** |
+---
 
-### 12.2 ① 설치 경로 (예: `/app`)
-- `INSTALL_ROOT=/app` 하나만 주면: `AIRFLOW_HOME=/app/airflow`, `VENV=/app/airflow/venv`,
-  `INSTALL_DIR=/app/airflow-install` 자동 파생.
-- **AIRFLOW_HOME 은 계정 home 과 무관**하게 위치(서비스 계정 home 이 `/home/...`여도 무방).
-- `/app` 은 보안 마운트가 아닌 **일반 디렉터리(실행 가능)** 전제 → `noexec` 고려 불필요.
-- **SELinux 정합 필요**: 새 파일시스템/비표준 경로는 기본 레이블이 `/opt`와 다름.
-  `06-selinux.sh` 가 `semanage fcontext -a -e /opt ${INSTALL_ROOT}` 로 **/opt 규칙을 상속**시키고
-  `restorecon` 으로 relabel (Enforcing 유지). `INSTALL_ROOT=/opt`면 자동 스킵.
-- systemd 유닛의 `ExecStart`/`User` 는 정적 파일이 아니라 **05가 변수로 렌더링** → 경로 바뀌어도 정합.
+## 12. 유연한 구성 — 설치경로 / 실행계정 / DB 외부화
 
-### 12.3 ② 실행 계정
-- `CREATE_USER=true`(기본): 그룹+시스템계정 생성(없을 때만).
-- `CREATE_USER=false`: 조직 제공 계정 사용. 계정이 없으면 **에러로 중단**(오설치 방지).
-- 디렉터리/`airflow.cfg`/유닛의 소유·실행 주체를 `AIRFLOW_USER:AIRFLOW_GROUP` 로 일괄 반영.
+(2.11 설계 §12 그대로 유효 — `INSTALL_ROOT`, `AIRFLOW_USER`/`CREATE_USER`,
+`DB_MODE=local|external`+`03b-db-external.sh`, SELinux equivalence `semanage fcontext -e /opt`.
+상세는 git 히스토리의 2.11 설계서 참조.)
 
-### 12.4 ③ PostgreSQL: local vs external
-**`DB_MODE=local`(기본):** 기존과 동일. `01`이 `postgresql-server` 설치, `03-postgres.sh`가
-initdb/기동/`pg_hba`(ident→md5)/DB·롤 생성.
-
-**`DB_MODE=external`(서비스 제공 DB):**
-- `01`은 `postgresql-server`를 **설치하지 않음**(클라이언트 `libpq`만). `03-postgres.sh`는 자동 스킵.
-- 대신 **`03b-db-external.sh`** 사용:
-  1. `PG_HOST:PG_PORT` **TCP 도달성** 검사(라우팅/방화벽),
-  2. `PG_ADMIN_USER/PASSWORD` 가 있으면 원격에 **DB/롤 생성**(idempotent), 없으면 DBA 사전 프로비저닝 가정,
-  3. airflow 자격증명으로 **실연결 검증**.
-- 연결 문자열은 `SQLA_CONN`(env.sh 파생)이 **`?sslmode=${PG_SSLMODE}`** 포함.
-  관리형 DB는 보통 `require`/`verify-full`. Celery `result_backend`도 동일 DB 지향.
-- Airflow 마이그레이션이 테이블을 만들므로 airflow 롤은 해당 DB **스키마 생성 권한** 필요.
-- 브로커도 외부면 `INSTALL_REDIS=false` + `REDIS_HOST` 외부 지정(Phase2 연계).
-
-### 12.5 실행 순서(일반화)
-```
-00-repo.sh
-01-os-packages.sh            # DB_MODE/INSTALL_REDIS 에 따라 패키지 가감
-06-selinux.sh                # INSTALL_ROOT!=/opt 일 때만 작동
-02-venv-offline.sh
-# DB:
-03-postgres.sh               # DB_MODE=local
-#   또는
-03b-db-external.sh           # DB_MODE=external
-04-redis.sh                  # INSTALL_REDIS=true 일 때만
-05-airflow-init.sh           # cfg/migrate/admin/systemd(변수 렌더링)
-```
-
-### 12.6 구성 예시
 ```bash
 # 예) /app 경로 + 기존계정 svc_airflow + 외부 관리형 PostgreSQL(SSL)
 export INSTALL_ROOT=/app
 export AIRFLOW_USER=svc_airflow AIRFLOW_GROUP=svc_airflow CREATE_USER=false
-export DB_MODE=external PG_HOST=pg.db.internal PG_PORT=5432 \
-       PG_DB=airflow PG_USER=airflow PG_PASSWORD='***' PG_SSLMODE=require
-# (DB/롤을 우리가 만들어야 하면) PG_ADMIN_USER/PG_ADMIN_PASSWORD 추가
+export DB_MODE=external PG_HOST=pg.db.internal PG_SSLMODE=require PG_PASSWORD='***'
 ```
-
-### 12.7 비고 / 주의
-- 현재 가동 중인 노드(192.168.122.62)는 `/opt`+로컬PG로 이미 설치됨. 위 일반화는 **신규/재배포**에 적용.
-  경로/DB를 바꾸려면 **새 값으로 재설치**가 깔끔(기존 venv·DB 이전은 별도 마이그레이션 작업).
-- wheelhouse(빌드 산출물)는 경로·계정·DB 모드와 **무관** — 재빌드 불필요, 그대로 재사용.
 
 ---
 
-## 13. airflow.cfg / 비밀(secret) 처리
-
-`05-airflow-init.sh`가 **설정과 비밀을 분리**해 생성한다.
-
-| 파일 | 내용 | 권한 |
-|---|---|---|
-| `${AIRFLOW_HOME}/airflow.cfg` | 비밀 **제외** 설정(executor/경로/포트 등 최소셋) | 640 `airflow:grp` |
-| `${AIRFLOW_HOME}/airflow-secrets.env` | 모든 비밀을 `AIRFLOW__SECTION__KEY` 환경변수로 | **600** `airflow:grp` |
-
-비밀 항목(env): `SQL_ALCHEMY_CONN`(DB비번 포함), `FERNET_KEY`, `WEBSERVER__SECRET_KEY`,
-`CELERY__BROKER_URL`, `CELERY__RESULT_BACKEND`. Airflow는 env(`AIRFLOW__*`)가 cfg보다 우선.
-
-### ① 키 영속화
-fernet/secret 키 결정 우선순위: **env 주입(`AF_FERNET_KEY`/`AF_SECRET_KEY`) > 기존 secrets파일 재사용 > 신규생성**.
-- 재실행해도 키 동일 유지(검증: fernet 앞8 `Ctnmrxb4` 동일) → 기존 암호화 Connection/Variable 보존.
-- **다중노드(Phase2)**: `airflow-secrets.env`를 워커에 배포(또는 동일 `AF_*_KEY` 주입)하면 전 노드 키 일치.
-
-### ② cfg 멱등
-`airflow.cfg` 존재 시 `airflow.cfg.bak.<타임스탬프>` 로 **백업 후 재생성**(수정본 유실 방지, 검증: 재실행마다 `.bak` 누적).
-
-### ③ 비밀 분리(주입 경로)
-- systemd: 유닛에 `EnvironmentFile=` 2개(`airflow.env`=AIRFLOW_HOME, `airflow-secrets.env`=비밀).
-- CLI(db migrate 등): `run_af()` 가 secrets를 `source` 로 주입 — **`ps` 인자 노출 없음**.
-- cfg에는 평문 비밀이 남지 않음(검증: `grep password|fernet|secret_key|sql_alchemy_conn` → 주석만 매칭).
-
-### 주의
-- secrets 값은 **공백 없는 값** 전제(systemd EnvironmentFile/bash source 호환). 공백 포함 비번은 인용 처리 필요.
-- 인라인-cfg(구버전)→env 전환 시 **기존 cfg의 키를 추출해 `AF_*_KEY`로 주입**해야 키 보존(이번 마이그레이션에 적용).
-
-### airflow.cfg 주요 설정 (설치 시 적용, `AF_*` 변수)
-`05`가 생성하는 secret-free `airflow.cfg`에 `env.sh` 의 `AF_*` 값으로 렌더링. 기본은 **중간 규모 프로파일 + KST**.
-모두 설치 시 환경변수로 override 가능. (검증: `airflow config get-value` 로 Airflow가 수용 확인)
-
-| 분류 | 키(env / cfg) | 기본값 |
-|---|---|---|
-| 타임존 | `AF_DEFAULT_TIMEZONE` / `[core]default_timezone`, `AF_UI_TIMEZONE` / `[webserver]default_ui_timezone` | `Asia/Seoul` |
-| UI config | `AF_EXPOSE_CONFIG` / `[webserver]expose_config` | `True` |
-| 성능 | `AF_PARALLELISM`(64), `AF_MAX_ACTIVE_TASKS_PER_DAG`(32), `AF_MAX_ACTIVE_RUNS_PER_DAG`(16), `AF_MAX_TIS_PER_QUERY`(512) | (중간 규모) |
-| 스케줄러 | `AF_PARSING_PROCESSES`(4), `AF_MIN_FILE_PROCESS_INTERVAL`(30), `AF_DAG_DIR_LIST_INTERVAL`(300), `AF_SCHEDULER_HEARTBEAT_SEC`(5), `AF_CATCHUP_BY_DEFAULT`(False) | |
-| DB 풀 | `AF_SQL_POOL_SIZE`(10), `AF_SQL_MAX_OVERFLOW`(20), `AF_SQL_POOL_RECYCLE`(1800), `AF_SQL_POOL_PRE_PING`(True) | |
-| Celery | `AF_CELERY_WORKER_CONCURRENCY`(16) | |
-| Webserver | `AF_WEBSERVER_WORKERS`(4), `AF_WORKER_CLASS`(sync; async extra면 gevent), `AF_WEB_WORKER_TIMEOUT`(120) | |
-| 표시/보안 | `AF_INSTANCE_NAME`(AIRFLOW), `AF_NAVBAR_COLOR`, `AF_EXPOSE_HOSTNAME`(False), `AF_EXPOSE_STACKTRACE`(False), `AF_WARN_DEPLOYMENT_EXPOSURE`(True) | |
-| 코어/로깅/API | `AF_LOAD_EXAMPLES`(False), `AF_DAGS_PAUSED_AT_CREATION`(True), `AF_DEFAULT_TASK_RETRIES`(1), `AF_LOGGING_LEVEL`(INFO), `AF_API_AUTH_BACKENDS` | |
-
-## 11-A. 구축 결과 (AS-BUILT, 2026-06-26, 192.168.122.62 단일노드)
+## 13. AS-BUILT (2026-07-16, 192.168.122.191 단일노드 Phase 1)
 
 | 항목 | 결과 |
 |---|---|
-| Airflow | 2.11.0 (LocalExecutor), venv `/opt/airflow/venv` |
-| wheelhouse | 163 wheel, 60MB, `--no-index` 오프라인 설치 성공 |
-| PostgreSQL | **13.14** (AppStream 기본 모듈), DB/롤 `airflow` |
+| Airflow | **3.3.0** (LocalExecutor), venv `/opt/airflow/venv` — **Python 3.11.2** |
+| wheelhouse | **209 wheel** (async-timeout 보충 포함), `--no-index` 오프라인 설치 성공 |
+| OS 패키지 | `RPM_SOURCE=system` (VM 자체 DVD ISO repo) — python3.11/postgresql/redis 등 |
+| PostgreSQL | 13.10 (AppStream 기본 모듈), DB/롤 `airflow` |
 | Redis | 6.2.7 (127.0.0.1:6379, Phase2 대비) |
-| 서비스 | postgresql/redis/airflow-scheduler/airflow-webserver 모두 active |
-| 검증 | `/health` 200(metadatabase·scheduler healthy), 테스트 DAG 태스크 SUCCESS |
-| 접속 | http://192.168.122.62:8080  (admin / `Airflow#Adm2026`) |
-| DB 비밀번호 | `Airflow#Pg2026` (운영 전 교체 권장) |
+| 서비스 | postgresql / redis / **airflow-api-server / airflow-scheduler / airflow-dag-processor / airflow-triggerer** 모두 active |
+| health | `/api/v2/monitor/health` → metadatabase·scheduler·triggerer·dag_processor 모두 healthy |
+| 인증 | FabAuthManager — `POST /auth/token`(admin) JWT 발급 확인, UI 200 |
+| E2E | `smoke_test` DAG(TaskFlow, `airflow.sdk`) 트리거 → 2개 태스크 SUCCESS, XCom 전달·태스크 로그 확인 |
+| 방화벽 | firewalld 8080/tcp 개방 (Phase1 표준) |
+| 접속 | http://192.168.122.191:8080 (admin / `Airflow#Adm2026`) · DB 비번 `Airflow#Pg2026` (운영 전 교체) |
 
-**설계 대비 변경점**
-- PostgreSQL은 RHEL AppStream 기본 모듈이라 15가 아닌 **13.14** 설치됨(Airflow 2.11과 호환). 15가 필요하면 `dnf module enable postgresql:15` 후 재설치.
-- **pg_hba.conf 수정 필수**: RHEL 기본은 `127.0.0.1/32 ident` 가 먼저 매칭되어 끝에 md5 규칙을 추가해도 무효 → localhost TCP 라인을 `ident`→`md5`로 **교체**해야 함. `03-postgres.sh`에 반영 완료.
-
-## 11. 리스크 / 확인 필요
-- **Python 3.9 EOL**: 2025-10 보안지원 종료 예정. 단일 폐쇄망 단기 운영엔 무방하나, 장기 운영은 3.11/3.12 재패키징 권고.
-- **constraints의 sdist-only 패키지**: `pip wheel` 단계에서 컨테이너에 빌드툴 필요한 경우 있음 → UBI9/python-39 이미지에 `gcc`/`*-devel` 추가 설치 후 빌드(스크립트에 반영 예정).
-- **RHEL repo GPG**: 미러에 GPG 키 존재 여부 확인 후 `gpgcheck` 정책 확정.
-- **DAGs 배포 전략(Phase2)**: NFS vs GitOps 결정 필요.
-```
-```
-
----
-
-*다음 단계 제안: (1) `build/build-wheelhouse.sh` + `install/*.sh` 스크립트 생성 → (2) wheelhouse 빌드 실행 → (3) 대상 서버 설치. 진행 승인 시 작업 시작.*
+**설치 중 발견/수정 사항**
+1. **패치버전 조건부 의존성**: 빌드 컨테이너(ubi9/python-311 = 3.11.9+)와 대상(RHEL 9.2 = 3.11.2)의
+   패치 차이로 redis-py의 `async-timeout>=4.0.3; python_full_version < "3.11.3"` 이 wheelhouse에서 누락
+   → 설치 시 ResolutionImpossible. **빌드 스크립트가 async-timeout 을 명시 수집**하도록 수정(재발 방지).
+2. DAG 작성은 3.x 스타일(`from airflow.sdk import dag, task`, `schedule=None`) 필요 — 2.x DAG 이관 시 주의.

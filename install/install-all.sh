@@ -27,4 +27,4 @@ fi
 step "04 Redis";                 "${HERE}/04-redis.sh"
 step "05 Airflow 초기화";        "${HERE}/05-airflow-init.sh"
 
-echo; echo ">> 전체 설치 완료. http://<server>:8080"
+echo; echo ">> 전체 설치 완료. UI: http://<server>:${AF_API_PORT}  health: /api/v2/monitor/health"

@@ -252,6 +252,19 @@ AIRFLOW__CELERY__RESULT_BACKEND
 3. `AF_EXECUTION_API_URL`(기본 `http://${CONTROL_IP}:8080/execution/`)이 cfg에 렌더링됨.
    워커는 cluster.env의 `CONTROL_IP`로 자동 파생.
 4. 방화벽: control 8080이 **UI뿐 아니라 태스크 실행 경로** — 워커 CIDR에서 반드시 도달 가능해야 함.
+   `OPEN_FIREWALL=true` 시 05가 control 8080, **worker 8793**(로그 서빙)을 개방(검증 중 반영).
+
+### 8.6 Phase 2 검증에서 확인된 운영 필수 요건
+- **비밀번호의 URL 특수문자**: `#`/`@`/`:` 등이 든 PG/Redis 비밀번호는 celery(kombu) URL 파서를
+  깨뜨림(`Port could not be cast … as 'Airflow'` 로 워커 즉사). SQLAlchemy는 관대해 Phase 1에선
+  안 드러남. → `env.sh`가 연결 URL 조립 시 **percent-encoding** 하도록 수정(검증 완료).
+- **노드별 고유 hostname 필수**: 태스크 로그는 `task_instance.hostname:8793` 에서 fetch됨.
+  hostname이 `localhost.localdomain` 이면 control이 자기 자신에서 로그를 찾아 실패.
+  → 각 워커에 고유 hostname(`hostnamectl set-hostname airflow-worker-N`) + control에서
+  resolve 가능해야 함(/etc/hosts 또는 DNS).
+- **DAG 파일은 전 노드 동일 배포**: 3.x 워커는 태스크 시작 시 로컬 dag bundle에서 DAG를 파싱.
+  워커에 파일이 없으면 `Dag not found during start up` → 3회 재스케줄 후 실패(retry로 회복 가능).
+  NFS/GitOps/rsync 등으로 `${AIRFLOW_HOME}/dags` 동기화 필수(§8.5와 동일).
 
 ---
 
@@ -316,3 +329,18 @@ export DB_MODE=external PG_HOST=pg.db.internal PG_SSLMODE=require PG_PASSWORD='*
    패치 차이로 redis-py의 `async-timeout>=4.0.3; python_full_version < "3.11.3"` 이 wheelhouse에서 누락
    → 설치 시 ResolutionImpossible. **빌드 스크립트가 async-timeout 을 명시 수집**하도록 수정(재발 방지).
 2. DAG 작성은 3.x 스타일(`from airflow.sdk import dag, task`, `schedule=None`) 필요 — 2.x DAG 이관 시 주의.
+
+## 13-B. AS-BUILT Phase 2 (2026-07-16, control 191 + worker 62)
+
+| 항목 | 결과 |
+|---|---|
+| 토폴로지 | control `192.168.122.191`(RHEL 9.2) + celery worker `192.168.122.62`(RHEL 9.4, `airflow-worker-1`) |
+| 전환 방법 | `gen-cluster-keys.sh` → cluster.env(fernet/secret/**jwt**/redis비번 공유) → 191 `ROLE=control` 재설치, 62 `ROLE=worker` 설치 |
+| control | CeleryExecutor, PG `listen_addresses=localhost,191` + hba `192.168.122.0/24 md5`, Redis requirepass·bind, 방화벽 5432/6379/8080 |
+| worker | 로컬 DB/Redis 미설치(03b 원격검증 통과), `execution_api_server_url=http://192.168.122.191:8080/execution/`, 방화벽 8793 |
+| celery 등록 | `celery inspect ping` → `celery@airflow-worker-1: OK (1 node online)` |
+| E2E | smoke_test 4개 런 모두 success — **태스크 로그가 워커에만 생성**(Execution API 경유 실행 증명), XCom 정상 |
+| 원격 로그 | control REST `/api/v2/.../logs/1` 이 워커 :8793 에서 로그 fetch 성공 |
+| 회복력 | DAG 미배포로 실패한 태스크가 파일 배포 후 **retry(try 2)로 자동 회복** |
+
+이 과정에서 §8.6의 세 가지 운영 요건(비밀번호 인코딩·고유 hostname·DAG 동기화)이 실측 확인됨.

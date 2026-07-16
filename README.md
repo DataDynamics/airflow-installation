@@ -117,6 +117,11 @@ flowchart TB
 > 워커는 `ROLE=worker` 로 설치 시 로컬 DB/Redis를 설치하지 않고 control에 접속만 한다.
 > 공유 비밀에 fernet/secret 외에 **`AF_JWT_SECRET`** 이 추가됨(전 노드 동일 필수).
 
+**Phase 2 운영 필수 요건** (검증에서 실측 확인, DESIGN §8.6):
+1. 각 노드는 **고유 hostname** + control에서 resolve 가능해야 함(로그 fetch가 `hostname:8793` 사용).
+2. **DAG 파일은 전 노드 동일 배포**(NFS/GitOps/rsync) — 워커가 태스크 시작 시 로컬에서 파싱.
+3. PG/Redis 비밀번호에 특수문자가 있어도 됨 — env.sh가 URL 조립 시 percent-encoding 처리.
+
 ---
 
 ## 4. 설치 모드 — 한번에 vs 각 서버 직접

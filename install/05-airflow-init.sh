@@ -154,8 +154,19 @@ fi
 systemctl enable ${SERVICES} >/dev/null 2>&1 || true
 systemctl restart ${SERVICES}
 
+# --- Phase2 방화벽: control은 api(8080, 워커 Execution API 경로), worker는 로그서빙(8793) ---
+if [ "${OPEN_FIREWALL}" = "true" ] && systemctl is-active --quiet firewalld; then
+  if [ "${ROLE}" = "control" ]; then
+    firewall-cmd --permanent --add-port="${AF_API_PORT}/tcp" >/dev/null && firewall-cmd --reload >/dev/null
+    echo ">> firewalld: ${AF_API_PORT}/tcp 개방(UI + Execution API)"
+  else
+    firewall-cmd --permanent --add-port=8793/tcp >/dev/null && firewall-cmd --reload >/dev/null
+    echo ">> firewalld: 8793/tcp 개방(워커 로그 서빙)"
+  fi
+fi
+
 echo ">> Airflow 초기화 완료. ROLE=${ROLE}  기동=[${SERVICES}]"
 echo ">> cfg=${CFG}(비밀없음)  secrets=${SECRETS_FILE}(600)"
 echo ">> AIRFLOW_HOME=${AIRFLOW_HOME}  user=${AIRFLOW_USER}  DB_MODE=${DB_MODE}  executor=${AF_EXECUTOR}"
 echo ">> health: curl http://127.0.0.1:${AF_API_PORT}/api/v2/monitor/health"
-[ "${ROLE}" = "control" ] && echo ">> 워커 노드엔 동일 cluster-secrets(fernet/secret/jwt/비번)·ROLE=worker 로 설치"
+[ "${ROLE}" = "control" ] && echo ">> 워커 노드엔 동일 cluster-secrets(fernet/secret/jwt/비번)·ROLE=worker 로 설치" || true

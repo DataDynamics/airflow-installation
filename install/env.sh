@@ -120,7 +120,7 @@ export REDIS_PASSWORD="${REDIS_PASSWORD:-}"           # 설정 시 브로커 인
 # control 노드의 원격 개방(비우면 Phase1 localhost 전용 유지):
 export PG_LISTEN_ADDRESSES="${PG_LISTEN_ADDRESSES:-}" # 예: "localhost,192.168.0.1" 또는 "*"
 export PG_ALLOW_CIDR="${PG_ALLOW_CIDR:-}"             # 워커 허용 범위 예: 192.168.0.0/24
-export OPEN_FIREWALL="${OPEN_FIREWALL:-false}"        # control: 5432/6379/8080 개방, worker: 불필요
+export OPEN_FIREWALL="${OPEN_FIREWALL:-false}"        # control: 5432/6379/8080 개방, worker: 8793(로그 서빙)
 export ENABLE_FLOWER="${ENABLE_FLOWER:-false}"        # control: flower(:5555) 기동 여부
 
 # 워커는 로컬 DB/Redis 미설치 강제
@@ -128,16 +128,20 @@ if [ "${ROLE}" = "worker" ]; then
   DB_MODE="external"; INSTALL_REDIS="false"
 fi
 
-# --- 파생: SQLAlchemy 연결 문자열 ---
-export SQLA_CONN="postgresql+psycopg2://${PG_USER}:${PG_PASSWORD}@${PG_HOST}:${PG_PORT}/${PG_DB}?sslmode=${PG_SSLMODE}"
+# --- 파생: 연결 URL. 비밀번호는 percent-encoding 필수 ---
+# (#/@/: 등 특수문자가 있으면 kombu(celery) URL 파서가 깨짐. SQLAlchemy는 인코딩된 값도 수용)
+urlenc() { python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
+PG_PASSWORD_ENC="$(urlenc "${PG_PASSWORD}")"
+
+export SQLA_CONN="postgresql+psycopg2://${PG_USER}:${PG_PASSWORD_ENC}@${PG_HOST}:${PG_PORT}/${PG_DB}?sslmode=${PG_SSLMODE}"
 
 # --- 파생: Celery 브로커 URL (redis 인증 유무 반영) ---
 if [ -n "${REDIS_PASSWORD}" ]; then
-  export BROKER_URL="redis://:${REDIS_PASSWORD}@${REDIS_HOST}:${REDIS_PORT}/0"
+  export BROKER_URL="redis://:$(urlenc "${REDIS_PASSWORD}")@${REDIS_HOST}:${REDIS_PORT}/0"
 else
   export BROKER_URL="redis://${REDIS_HOST}:${REDIS_PORT}/0"
 fi
-export RESULT_BACKEND="db+postgresql://${PG_USER}:${PG_PASSWORD}@${PG_HOST}:${PG_PORT}/${PG_DB}?sslmode=${PG_SSLMODE}"
+export RESULT_BACKEND="db+postgresql://${PG_USER}:${PG_PASSWORD_ENC}@${PG_HOST}:${PG_PORT}/${PG_DB}?sslmode=${PG_SSLMODE}"
 
 # --- 파생: Task Execution API (3.x 신규) ---
 # 모든 태스크 실행(로컬/celery)이 api-server 의 /execution/ 을 호출. 워커는 control 을 바라봄.

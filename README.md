@@ -5,7 +5,8 @@ RHEL 9 폐쇄망(airgap)에 Apache **Airflow 3.3.0** (Python 3.11, PostgreSQL + 
 CeleryExecutor 다중 노드(Phase 2, 1 control + 3 celery)로 확장한다.
 
 > Airflow 3.2부터 Python 3.9 지원이 제거되어 **RHEL 9 AppStream `python3.11`** 을 사용한다
-> (시스템 기본 python3(3.9)는 건드리지 않음). 자세한 설계는 [`DESIGN.md`](./DESIGN.md) 참고.
+> (시스템 기본 python3(3.9)는 건드리지 않음). 자세한 설계는 [`DESIGN.md`](./DESIGN.md),
+> 3경로(Phase 1 / 모드 B / 모드 A) 검증 결과는 [`VERIFICATION.md`](./VERIFICATION.md) 참고.
 
 ---
 

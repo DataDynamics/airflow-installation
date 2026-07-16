@@ -344,3 +344,22 @@ export DB_MODE=external PG_HOST=pg.db.internal PG_SSLMODE=require PG_PASSWORD='*
 | 회복력 | DAG 미배포로 실패한 태스크가 파일 배포 후 **retry(try 2)로 자동 회복** |
 
 이 과정에서 §8.6의 세 가지 운영 요건(비밀번호 인코딩·고유 hostname·DAG 동기화)이 실측 확인됨.
+
+## 13-C. AS-BUILT 모드 A — deploy-cluster.sh 3노드 (2026-07-16)
+
+| 항목 | 결과 |
+|---|---|
+| 명령 | `CONTROL_IP=192.168.122.191 WORKER_IPS="192.168.122.62 192.168.122.92" SSH_USER=root SSH_PASS=*** ./deploy/deploy-cluster.sh` |
+| 흐름 | 번들+cluster.env push → control 설치 → **health 게이트**(`/api/v2/monitor/health` 200) 통과 → 워커 순차 설치, exit 0 |
+| 노드 | control 191(RHEL 9.2) · worker-1 62(RHEL 9.4) · worker-2 92(**Rocky 9.7**, fresh — 이기종 RHEL계열 혼합 검증) |
+| RPM_SOURCE | cluster.env 에 `export RPM_SOURCE=system` 추가로 노드별 기존 repo 사용(DVD/미러/Rocky 자체 repo) |
+| celery | `inspect ping` → worker-1·worker-2 모두 OK, **2 nodes online** |
+| 분산 실행 | smoke_test 4런 트리거 → 8/8 success, 태스크 분산: worker-1 5개 / worker-2 3개 |
+| 원격 로그 | 두 워커 모두 control REST에서 :8793 로그 fetch 성공 |
+
+**모드 A 관찰 사항**
+- `deploy-cluster.sh`는 전 노드 **동일 SSH 계정**(보통 root) 전제. root ssh 불가 환경은 모드 B 사용
+  (테스트에선 191에 `PermitRootLogin yes` 드롭인 추가로 통일).
+- 노드별 hostname/hosts 매핑과 DAG 배포(§8.6)는 스크립트 범위 밖 — 배포 전/후 별도 수행.
+- Rocky에 PGDG repo가 있으면 `libpq-devel`이 PGDG postgresql14-devel(+빌드체인 87패키지)로 해석됨 —
+  동작엔 무해하나 무거움. 순정 RHEL 미러(`RPM_SOURCE=mirror|bundle`)에선 발생하지 않음.

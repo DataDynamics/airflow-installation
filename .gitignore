@@ -1,4 +1,5 @@
 artifacts/
+artifacts-2.11-backup/
 *.tar.gz
 *.sha256
 dist/

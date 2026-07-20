@@ -56,14 +56,15 @@ Airflow airgap bundle
     constraints-${PY_TAG}.txt   pip constraints
     DESIGN.md               설계/런북
 
-서버 설치(예: 기본 /opt, 로컬 DB):
-  # OS 패키지를 번들 RPM(오프라인)으로 설치하려면 RPM_SOURCE=bundle 추가
-  1) scp airflow-${AIRFLOW_VERSION}-airgap-bundle.tar.gz* root@<server>:/opt/
-  2) ssh root@<server>
-  3) mkdir -p /opt/airflow-install && tar xzf /opt/airflow-${AIRFLOW_VERSION}-airgap-bundle.tar.gz \\
+서버 설치(예: 기본 /opt, 로컬 DB) — root 로그인 또는 sudo 권한 계정 둘 다 가능:
+  # OS 패키지 소스: RPM_SOURCE=mirror(기본) | bundle(번들 RPM) | system(서버 기존 repo)
+  1) scp airflow-${AIRFLOW_VERSION}-airgap-bundle.tar.gz* <계정>@<server>:/tmp/
+  2) ssh <계정>@<server>
+  3) sudo mkdir -p /opt/airflow-install && sudo tar xzf /tmp/airflow-${AIRFLOW_VERSION}-airgap-bundle.tar.gz \\
        -C /opt/airflow-install --strip-components=1
   4) cd /opt/airflow-install
      PG_PASSWORD=*** AF_ADMIN_PASSWORD=*** ./install/install-all.sh
+     # root가 아니면 sudo로 자동 승격(설정 변수도 자동 전달, 암호를 물을 수 있음)
   # 변수 조합 예) INSTALL_ROOT=/app  AIRFLOW_USER=svc  CREATE_USER=false  DB_MODE=external ...
 EOF
 

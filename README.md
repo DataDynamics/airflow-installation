@@ -135,7 +135,7 @@ flowchart TB
 ./build/package.sh                   # dist/airflow-2.11.0-airgap-bundle.tar.gz 생성
 ```
 
-### Phase 1 설치 (대상 서버)
+### Phase 1 설치 (대상 서버 — root 또는 sudo 권한 계정)
 ```bash
 mkdir -p /opt/airflow-install
 tar xzf airflow-2.11.0-airgap-bundle.tar.gz -C /opt/airflow-install --strip-components=1

@@ -3,6 +3,16 @@
 # 모든 값은 환경변수로 주입(override) 가능. 기본값은 "현재 /opt 단일노드 구성"을 재현.
 set -euo pipefail
 
+# --- 권한 가드: install 스크립트는 root 권한 필요 ------------------------------
+# install-all.sh 는 sudo 자동 승격을 지원. 개별 스크립트(00~06,99)를 직접 실행할 땐
+# sudo를 명시해야 한다. 예)  sudo ./install/03-postgres.sh
+if [ "$(id -u)" -ne 0 ]; then
+  echo "ERROR: root 권한 필요. sudo로 실행하세요:" >&2
+  echo "  sudo $0            # 개별 스크립트" >&2
+  echo "  ./install-all.sh   # 전체 설치는 sudo 자동 승격(변수도 자동 전달)" >&2
+  exit 1
+fi
+
 # --- 설치 환경 ---
 export AIRFLOW_VERSION="2.11.0"
 export PY_TAG="3.9"
@@ -41,7 +51,7 @@ export DB_MODE="${DB_MODE:-local}"
 export PG_DB="${PG_DB:-airflow}"
 export PG_USER="${PG_USER:-airflow}"
 export PG_PASSWORD="${PG_PASSWORD:-CHANGE_ME_STRONG}"   # 운영 시 반드시 교체/주입
-export PG_HOST="${PG_HOST:-127.0.0.1}"                  # external: 제공받은 DB 호스트
+export PG_HOST="${PG_HOST:-}"                           # 비우면 [5]에서 CONTROL_IP 로 파생(Phase1=127.0.0.1)
 export PG_PORT="${PG_PORT:-5432}"
 export PG_SSLMODE="${PG_SSLMODE:-disable}"              # external 관리형은 보통 require/verify-full
 # external 모드에서 DB/롤을 우리가 만들어야 할 때만 채움(이미 DBA가 만들면 비워둠).
@@ -50,7 +60,7 @@ export PG_ADMIN_PASSWORD="${PG_ADMIN_PASSWORD:-}"
 
 # --- Redis (Phase2 대비) ---
 export INSTALL_REDIS="${INSTALL_REDIS:-true}"          # external 브로커면 false 가능
-export REDIS_HOST="${REDIS_HOST:-127.0.0.1}"
+export REDIS_HOST="${REDIS_HOST:-}"                    # 비우면 [5]에서 CONTROL_IP 로 파생(Phase1=127.0.0.1)
 export REDIS_PORT="${REDIS_PORT:-6379}"
 
 # --- Airflow 관리자 / 보안키 ---

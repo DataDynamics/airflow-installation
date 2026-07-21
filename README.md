@@ -186,9 +186,40 @@ CONTROL_IP=192.168.0.1 WORKER_IPS="192.168.0.2 192.168.0.3 192.168.0.4" \
   ./deploy/print-node-commands.sh
 ```
 
+### Redis Sentinel (고가용 브로커, 옵션)
+
+기본 Phase 2 는 브로커(Redis)가 control 1대뿐이라 **브로커가 단일 장애점(SPOF)**이다.
+`REDIS_SENTINEL_ENABLED=true` 로 켜면 각 redis 노드에 **master/replica + redis-sentinel**을
+구성하고, 브로커 URL 을 `sentinel://` 로 생성한다. master 장애 시 sentinel 이 replica 를
+자동 승격(quorum 합의)하고, Celery(kombu)가 sentinel 에게 현재 master 를 물어 재연결한다.
+
+권장 토폴로지: redis+sentinel 을 **홀수 3대 이상**에 배치(예: control + DB 노드들). 결과
+백엔드(result_backend)는 그대로 PostgreSQL 을 쓴다.
+
+```bash
+# 예) 3대(.101 master, .102/.103 replica)에 sentinel HA 구성 — 각 노드에서:
+export REDIS_SENTINEL_ENABLED=true
+export REDIS_SENTINEL_HOSTS="192.168.0.1 192.168.0.2 192.168.0.3"   # 전 sentinel(전 노드 동일)
+export REDIS_MASTER_HOST=192.168.0.1                                # 부트스트랩 master
+export REDIS_ROLE=master     # .1 은 master, .2/.3 은 REDIS_ROLE=replica 로
+export REDIS_PASSWORD=***     # requirepass/masterauth (전 노드 동일)
+# ROLE=control INSTALL_REDIS=true ./install/install-all.sh
+```
+
+> 주의(설계상 함정, 코드에 반영됨):
+> - sentinel `bind` 는 **0.0.0.0** 를 쓴다(`127.0.0.1 <ip>` 로 두면 원격 master 접속 실패).
+> - `master_name` 은 환경변수로 kombu 에 전달되지 않아, `airflow.cfg` 의
+>   `[celery_broker_transport_options]` 섹션에 기록한다(05 가 자동 처리).
+
 주요 변수(전체는 `install/env.sh`): `INSTALL_ROOT`(설치경로), `AIRFLOW_USER`/`CREATE_USER`(계정),
 `RPM_SOURCE`(mirror|bundle|system), `DB_MODE`(local|external), `ROLE`(control|worker),
-`CONTROL_IP`, `REDIS_PASSWORD`, `AF_JWT_SECRET`, `OPEN_FIREWALL`.
+`CONTROL_IP`, `REDIS_PASSWORD`, `AF_JWT_SECRET`, `OPEN_FIREWALL`,
+`REDIS_SENTINEL_ENABLED`/`REDIS_SENTINEL_HOSTS`/`REDIS_ROLE`/`REDIS_MASTER_HOST`(Sentinel HA).
+
+> OS 패키지 단계(`01-os-packages.sh`)는 **best-effort** 로 동작한다. 오프라인 wheelhouse 가
+> psycopg2-binary 등 빌드 불필요 휠을 담으므로 gcc/`*-devel`/libpq-devel 은 필수가 아니며,
+> 대상 노드에 이미 다른 PostgreSQL(예: PGDG 16, libpq 16)이 있어 AppStream libpq-devel 과
+> 충돌해도 설치를 중단하지 않는다(PGDG repo 는 이 단계에서 비활성).
 
 ---
 

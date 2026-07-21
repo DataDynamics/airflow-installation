@@ -97,6 +97,17 @@ expose_config = ${AF_EXPOSE_CONFIG}
 expose_stacktrace = ${AF_EXPOSE_STACKTRACE}
 instance_name = ${AF_INSTANCE_NAME}
 EOF
+# Redis Sentinel 브로커: master_name 은 kombu 의 broker_transport_options 로 전달돼야 하는데
+# 환경변수(AIRFLOW__CELERY_BROKER_TRANSPORT_OPTIONS__MASTER_NAME)로는 반영되지 않는다
+# (워커가 "ValueError: 'master_name' transport option must be specified" 로 기동 실패).
+# → airflow.cfg 의 [celery_broker_transport_options] 섹션에 직접 기록해야 한다.
+if [ "${REDIS_SENTINEL_ENABLED}" = "true" ]; then
+  cat >> "${CFG}" <<EOF
+
+[celery_broker_transport_options]
+master_name = ${REDIS_MASTER_NAME}
+EOF
+fi
 chown "${AIRFLOW_USER}:${AIRFLOW_GROUP}" "${CFG}"; chmod 640 "${CFG}"
 
 # --- CLI 실행 헬퍼: 비밀 env를 ps 노출 없이 주입(source) ---

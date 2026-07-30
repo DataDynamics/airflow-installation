@@ -119,6 +119,27 @@
   no_log: true
   notify: restart redis-sentinel
 
+- name: sentinel.conf auth-pass 강제 (master 접속 비밀번호)
+  # ⚠ 이것도 최초 템플릿에만 있으면 안 된다. vault_redis_password 를 교체했는데
+  #   sentinel 은 옛 비밀번호를 계속 써서 master 에 붙지 못하고, 그 결과
+  #   페일오버가 조용히 죽는다(평소엔 아무 증상이 없다).
+  # ⚠ 삽입 위치가 중요하다. Sentinel 은 'sentinel auth-pass <name>' 을 파싱할 때
+  #   해당 이름의 master 가 이미 선언돼 있어야 한다. monitor 앞에 오면
+  #   "No such master with specified name" 으로 기동 자체가 실패한다.
+  #   그래서 insertafter 를 monitor 줄로 잡는다.
+  ansible.builtin.lineinfile:
+    path: "{{ redis_sentinel_conf }}"
+    regexp: '^sentinel auth-pass {{ redis_sentinel_master_name }}\s'
+    line: "sentinel auth-pass {{ redis_sentinel_master_name }} {{ vault_redis_password }}"
+    insertafter: '^sentinel monitor {{ redis_sentinel_master_name }}\s'
+    owner: redis
+    group: root
+    mode: "0640"
+    state: "{{ 'present' if vault_redis_password | length > 0 else 'absent' }}"
+  register: _sentinel_authpass
+  no_log: true
+  notify: restart redis-sentinel
+
 - name: sentinel 기동
   ansible.builtin.systemd:
     name: redis-sentinel
@@ -144,14 +165,14 @@
       redis-cli -h 127.0.0.1 -p {{ redis_sentinel_port }}
       sentinel reset {{ redis_sentinel_master_name }}
   environment: "{{ _sentinel_cli_env }}"
-  when: (_sentinel_static is changed) or (_sentinel_pass is changed)
+  when: (_sentinel_static is changed) or (_sentinel_pass is changed) or (_sentinel_authpass is changed)
   changed_when: true
   no_log: true
 
 - name: 재발견 대기
   ansible.builtin.pause:
     seconds: 15
-  when: (_sentinel_static is changed) or (_sentinel_pass is changed)
+  when: (_sentinel_static is changed) or (_sentinel_pass is changed) or (_sentinel_authpass is changed)
   run_once: true
 
 # --- 복제 부트스트랩 (최초 1회) ----------------------------------------------

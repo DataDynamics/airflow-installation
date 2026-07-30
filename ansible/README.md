@@ -198,6 +198,17 @@ ansible-playbook playbooks/deploy-dags.yml     # ha_failover_test 배포(24 태�
 airflow dags trigger ha_failover_test          # 실행 중 장애 주입
 ```
 
+### 비밀번호 교체
+
+`vault_redis_password` / `vault_db_password` 등을 바꾼 뒤에는 `site.yml` 을 다시 돌리면
+반영된다. Sentinel 쪽은 정적 설정(bind·announce·requirepass·**auth-pass**)을 매 실행
+강제하므로 교체가 누락되지 않는다.
+
+> Sentinel 의 `auth-pass` 가 옛 비밀번호로 남으면 master 접속이 끊기고 **페일오버가
+> 조용히 죽는다**(평소엔 아무 증상이 없다). 그래서 최초 템플릿에만 두지 않고 매번 강제한다.
+> `sentinel monitor` 보다 뒤에 와야 하므로 삽입 위치도 고정한다 — 앞에 오면
+> `No such master with specified name` 으로 Sentinel 기동 자체가 실패한다.
+
 ## 알려진 조율 대상 (Patroni 프로젝트 쪽)
 
 - **✅ keepalived 헬스체크 — 해결됨** (`patroni-postgresql-ha` commit `d08ea4a`).

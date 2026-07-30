@@ -1,0 +1,67 @@
+### {{ ansible_managed }}
+### Airflow UI 전용 HAProxy — Patroni 의 haproxy.cfg 와 완전히 분리된 인스턴스.
+### VIP({{ airflow_cluster_vip }})를 잡은 노드가 :{{ airflow_lb_port }} 로 들어온 요청을
+### 3대 api-server(:{{ airflow_api_port }})에 분산한다.
+
+global
+    log         /dev/log local0
+    maxconn     4000
+    user        haproxy
+    group       haproxy
+    stats socket /run/airflow-haproxy.sock mode 660 level admin
+
+defaults
+    mode        http
+    log         global
+    option      httplog
+    option      dontlognull
+    retries     3
+    timeout connect 5s
+    timeout client  {{ airflow_lb_timeout }}
+    timeout server  {{ airflow_lb_timeout }}
+    timeout http-request 15s
+
+listen stats
+    bind *:{{ airflow_lb_stats_port }}
+    stats enable
+    stats uri /
+    stats refresh 10s
+    stats show-node
+
+# ---- 메타DB 쓰기 경로 — 항상 '현재 Patroni Leader' 한 곳으로만 ----
+#   Patroni 의 /primary 는 리더에서만 HTTP 200, 나머지는 503 을 반환한다.
+#   따라서 200 을 주는 노드 = 현재 리더 로 자동 판별된다(Patroni 프로젝트와 동일 패턴).
+#
+#   ⚠ 백엔드는 pgbouncer(:6432)가 아니라 PostgreSQL(:{{ patroni_direct_port }}) 직결이다.
+#     pgbouncer 는 정적 userlist.txt(scram-sha-256)로 인증하는데 그 파일을 Patroni
+#     프로젝트가 3명 하드코딩으로 소유해, airflow 롤을 넣어도 다음 실행 때 지워진다.
+#
+#   127.0.0.1 로만 바인딩한다 — 이 리스너는 같은 노드의 Airflow 전용이다.
+listen airflow_pg_primary
+    bind 127.0.0.1:{{ airflow_db_port }}
+    mode tcp
+    option httpchk
+    http-check send meth GET uri /primary ver HTTP/1.1 hdr Host localhost
+    http-check expect status 200
+    # 페일오버 시 옛 리더로 향한 세션을 끊는다. Airflow 는 pool_pre_ping 으로 이를 흡수한다.
+    default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
+{% for h in groups['patroni_cluster'] %}
+    server {{ h }} {{ hostvars[h].node_ip }}:{{ patroni_direct_port }} check port {{ patroni_rest_port }}
+{% endfor %}
+
+frontend airflow_ui
+    bind *:{{ airflow_lb_port }}
+    default_backend airflow_api
+
+backend airflow_api
+    balance roundrobin
+    # api-server 는 JWT 기반이라 원칙적으로 무상태지만, 로그인 플로우 도중
+    # 노드가 바뀌는 것을 피하려고 쿠키 고정을 건다.
+    cookie AFSRV insert indirect nocache
+    option httpchk
+    http-check send meth GET uri /api/v2/monitor/health ver HTTP/1.1 hdr Host localhost
+    http-check expect status 200
+    default-server inter 5s fall 3 rise 2
+{% for h in groups['airflow_cluster'] %}
+    server {{ h }} {{ hostvars[h].node_ip }}:{{ airflow_api_port }} check cookie {{ h }}
+{% endfor %}

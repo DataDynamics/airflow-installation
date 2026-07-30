@@ -3,4 +3,5 @@ artifacts-2.11-backup/
 *.tar.gz
 *.sha256
 dist/
-artifacts-2.11-backup/
+__pycache__/
+*.pyc

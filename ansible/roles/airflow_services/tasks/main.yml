@@ -1,0 +1,78 @@
+---
+# systemd 유닛 배치 + 기동 + health 게이트.
+# site.yml 에서 serial:1 로 호출되므로 이 role 이 곧 무중단 롤링 재시작 경로다.
+
+- name: systemd 유닛 배치
+  ansible.builtin.template:
+    src: airflow-service.j2
+    dest: "/etc/systemd/system/airflow-{{ item.name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ airflow_service_defs }}"
+  loop_control:
+    label: "airflow-{{ item.name }}"
+  register: _units
+
+- name: systemd 재로드
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: 서비스 enable + 기동
+  ansible.builtin.systemd:
+    name: "airflow-{{ item.name }}"
+    enabled: true
+    state: started
+  loop: "{{ airflow_service_defs }}"
+  loop_control:
+    label: "airflow-{{ item.name }}"
+
+# 설정·유닛·venv 중 하나라도 바뀌었으면 이 노드만 재시작한다.
+# serial:1 이므로 나머지 2노드가 트래픽을 받는 동안 순차로 교체된다.
+- name: 변경 시 재시작
+  ansible.builtin.systemd:
+    name: "airflow-{{ item.name }}"
+    state: restarted
+  loop: "{{ airflow_service_defs }}"
+  loop_control:
+    label: "airflow-{{ item.name }}"
+  when: >-
+    (airflow_config_changed | default(false) | bool)
+    or (_units is changed)
+    or (airflow_needs_restart | default(false) | bool)
+
+- name: api-server health 대기
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ airflow_api_port }}/api/v2/monitor/health"
+    status_code: 200
+    timeout: 5
+  register: _health
+  retries: "{{ airflow_health_retries }}"
+  delay: "{{ airflow_health_delay }}"
+  until: _health.status | default(0) == 200
+  changed_when: false
+
+- name: 4개 컴포넌트 상태 확인
+  # metadatabase / scheduler / triggerer / dag_processor 가 모두 healthy 여야 한다.
+  ansible.builtin.assert:
+    that:
+      - _health.json.metadatabase.status == 'healthy'
+      - _health.json.scheduler.status == 'healthy'
+    fail_msg: "{{ inventory_hostname }} health 이상: {{ _health.json | to_json }}"
+    success_msg: "{{ inventory_hostname }}: api-server/metadatabase/scheduler healthy"
+
+- name: 이 노드의 celery worker 가 브로커에 등록됐는지 확인
+  ansible.builtin.command:
+    cmd: "{{ airflow_venv }}/bin/airflow jobs check --job-type TriggererJob --hostname {{ inventory_hostname }}"
+  environment:
+    AIRFLOW_HOME: "{{ airflow_home }}"
+  become: true
+  become_user: "{{ airflow_user }}"
+  register: _jobs
+  changed_when: false
+  failed_when: false
+
+- name: 재시작 플래그 해제
+  ansible.builtin.set_fact:
+    airflow_config_changed: false
+    airflow_needs_restart: false

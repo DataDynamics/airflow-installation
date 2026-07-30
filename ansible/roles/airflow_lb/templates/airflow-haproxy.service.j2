@@ -1,0 +1,21 @@
+### {{ ansible_managed }}
+### Patroni 의 haproxy.service 와 공존해야 하므로 설정파일·PID·소켓을 전부 분리한다.
+[Unit]
+Description=HAProxy for Airflow UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+Environment="CONFIG={{ airflow_lb_config }}" "PIDFILE=/run/airflow-haproxy.pid"
+ExecStartPre=/usr/sbin/haproxy -f $CONFIG -c -q
+ExecStart=/usr/sbin/haproxy -Ws -f $CONFIG -p $PIDFILE
+ExecReload=/usr/sbin/haproxy -f $CONFIG -c -q
+ExecReload=/bin/kill -USR2 $MAINPID
+KillMode=mixed
+Restart=always
+RestartSec=5s
+SuccessExitStatus=143
+
+[Install]
+WantedBy=multi-user.target

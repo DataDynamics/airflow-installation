@@ -1,0 +1,97 @@
+---
+# airgap 번들 전개 + wheelhouse 오프라인 설치. 네트워크(PyPI)를 절대 쓰지 않는다.
+
+- name: 번들 체크섬 (컨트롤 노드)
+  ansible.builtin.stat:
+    path: "{{ airflow_bundle_src }}"
+    checksum_algorithm: sha1
+  register: _bundle_local
+  delegate_to: localhost
+  run_once: true
+  become: false
+
+- name: 번들 전송
+  # 142MB × 노드수. 체크섬이 같으면 재전송하지 않는다.
+  ansible.builtin.copy:
+    src: "{{ airflow_bundle_src }}"
+    dest: "{{ airflow_stage_dir }}/bundle.tar.gz"
+    owner: root
+    group: root
+    mode: "0644"
+  register: _bundle_copy
+
+- name: 번들 전개
+  ansible.builtin.unarchive:
+    src: "{{ airflow_stage_dir }}/bundle.tar.gz"
+    dest: "{{ airflow_stage_dir }}"
+    remote_src: true
+    extra_opts: ["--strip-components=1"]
+    owner: root
+    group: root
+  when: _bundle_copy is changed
+
+- name: wheelhouse / constraints 확인
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: _art
+  loop:
+    - "{{ airflow_stage_dir }}/wheelhouse"
+    - "{{ airflow_stage_dir }}/constraints-3.11.txt"
+
+- name: 산출물 누락이면 중단
+  ansible.builtin.assert:
+    that: item.stat.exists
+    fail_msg: "번들에 {{ item.item }} 이 없습니다 — package.sh 산출물을 확인하세요."
+  loop: "{{ _art.results }}"
+  loop_control:
+    label: "{{ item.item | basename }}"
+
+- name: venv 생성
+  ansible.builtin.command:
+    cmd: "{{ airflow_python }} -m venv {{ airflow_venv }}"
+    creates: "{{ airflow_venv }}/bin/python"
+  become_user: "{{ airflow_user }}"
+  become: true
+
+- name: pip / setuptools / wheel 부트스트랩 (오프라인)
+  ansible.builtin.pip:
+    name: [pip, setuptools, wheel]
+    state: latest
+    virtualenv: "{{ airflow_venv }}"
+    extra_args: "--no-index --find-links {{ airflow_stage_dir }}/wheelhouse"
+  become_user: "{{ airflow_user }}"
+  become: true
+
+- name: Airflow 본체 설치 (오프라인 + constraints)
+  ansible.builtin.pip:
+    name: "apache-airflow[{{ airflow_extras }}]=={{ airflow_version }}"
+    virtualenv: "{{ airflow_venv }}"
+    extra_args: >-
+      --no-index --find-links {{ airflow_stage_dir }}/wheelhouse
+      -c {{ airflow_stage_dir }}/constraints-3.11.txt
+  become_user: "{{ airflow_user }}"
+  become: true
+  notify: restart airflow services
+
+- name: 의존성 정합 검사
+  # 과거 빌드 이미지와 타깃의 파이썬 패치 차이로 마커 의존성(async-timeout)이
+  # 누락된 적이 있다. 여기서 걸러야 런타임에 ImportError 로 터지지 않는다.
+  ansible.builtin.command:
+    cmd: "{{ airflow_venv }}/bin/pip check"
+  register: _pipcheck
+  changed_when: false
+  failed_when: _pipcheck.rc != 0
+
+- name: 설치된 Airflow 버전 확인
+  ansible.builtin.command:
+    cmd: "{{ airflow_venv }}/bin/airflow version"
+  register: _afver
+  changed_when: false
+  environment:
+    AIRFLOW_HOME: "{{ airflow_home }}"
+
+- name: 버전 일치 확인
+  ansible.builtin.assert:
+    that: _afver.stdout.strip() == airflow_version
+    fail_msg: "설치된 버전 {{ _afver.stdout.strip() }} != 기대 {{ airflow_version }}"
+    success_msg: "Airflow {{ _afver.stdout.strip() }} 설치 확인"

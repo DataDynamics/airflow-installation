@@ -1,0 +1,11 @@
+---
+# 무중단 롤링 재시작 — 한 노드씩 재시작하고 healthy 를 확인한 뒤 다음으로 넘어간다.
+#   ansible-playbook playbooks/rolling-restart.yml
+- name: 롤링 재시작
+  hosts: airflow_cluster
+  gather_facts: false
+  serial: 1
+  vars:
+    airflow_needs_restart: true    # 변경이 없어도 강제 재시작
+  roles:
+    - airflow_services

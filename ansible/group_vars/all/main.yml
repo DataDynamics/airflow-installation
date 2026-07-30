@@ -1,0 +1,126 @@
+---
+# =============================================================================
+# Airflow 3.x HA 클러스터 — 전역 변수
+# -----------------------------------------------------------------------------
+# 비밀값은 여기 두지 않는다. group_vars/all/vault.yml (ansible-vault 암호화) 참조.
+# 환경 고유값(IP 등)을 저장소에 남기고 싶지 않으면 -e @lab-vars.yml 로 덮어쓸 것.
+# =============================================================================
+
+# --- 경로 기준점 -------------------------------------------------------------
+# playbook_dir 을 쓰면 playbooks/ 하위에서 실행할 때 한 단계 어긋난다.
+# inventory 위치(ansible/inventory)를 기준으로 잡아 어느 플레이북에서든 동일하게 해석되게 한다.
+airflow_repo_root: "{{ inventory_dir | dirname | dirname }}"
+
+# --- 버전 / 산출물 -----------------------------------------------------------
+airflow_version: "3.3.0"
+airflow_python: /usr/bin/python3.11          # RHEL 9 AppStream. 3.2+ 는 3.10 미만 미지원
+# 빌드머신에서 만든 airgap 번들(wheelhouse + constraints). 이 저장소 dist/ 기준.
+airflow_bundle_src: "{{ airflow_repo_root }}/dist/airflow-{{ airflow_version }}-airgap-bundle.tar.gz"
+airflow_extras: "celery,postgres,redis,fab,standard,common-sql,ssh,apache-kafka,sftp,ftp,apache-hdfs,samba,pandas,uv,async,ldap"
+
+# --- 설치 경로 / 계정 --------------------------------------------------------
+airflow_install_root: /opt
+airflow_home: "{{ airflow_install_root }}/airflow"
+airflow_venv: "{{ airflow_home }}/venv"
+airflow_stage_dir: "{{ airflow_install_root }}/airflow-install"   # 번들 전개 위치
+airflow_user: airflow
+airflow_group: airflow
+airflow_manage_selinux: true
+
+# --- 클러스터 VIP (Keepalived) ----------------------------------------------
+# Patroni 프로젝트가 관리하는 VIP. Airflow 는 UI 진입에만 쓴다(DB 경로에는 쓰지 않음).
+airflow_cluster_vip: 192.168.122.100
+
+# --- 메타DB: 기존 Patroni 클러스터 ------------------------------------------
+# ⚠ Patroni 의 HAProxy(:5000)는 pgbouncer 를 거치는데, pgbouncer 가
+#   auth_type=scram-sha-256 + 정적 userlist.txt 를 쓴다. 그 파일은 Patroni 프로젝트의
+#   템플릿이 3명(appuser/postgres/pgbouncer_admin)으로 하드코딩해 소유하므로
+#   airflow 롤을 넣어도 다음 Patroni 실행 때 지워지고 'SASL authentication failed' 가 난다.
+#   → pgbouncer 를 우회한다. 우리가 이미 각 노드에 띄우는 airflow-haproxy 에
+#     PostgreSQL RW 리스너를 추가해 Patroni REST(/primary)로 현재 Leader 를 찾아 직결한다.
+#   부수 효과로 pgbouncer 의 default_pool_size(=25) 경합과 transaction 풀링 위험도 사라진다.
+airflow_db_host: 127.0.0.1           # 각 노드의 로컬 airflow-haproxy
+airflow_db_port: 5433                # airflow-haproxy PostgreSQL RW 리스너
+airflow_db_name: airflow
+airflow_db_user: airflow
+airflow_db_sslmode: disable
+# Patroni 좌표 — Leader 탐색(REST)과 백엔드(PostgreSQL 직결) 포트.
+patroni_rest_port: 8008
+patroni_direct_port: 5432
+postgresql_unix_socket: /var/run/postgresql
+# community.postgresql 모듈은 '대상 인터프리터'에서 psycopg2 를 import 한다.
+# 이 노드들의 psycopg2 는 python3-psycopg2 RPM(= 시스템 python3.9)에만 있고
+# Airflow 용 python3.11 에는 없다(설치할 이유도 없다 — Airflow 는 venv 안에 따로 갖는다).
+# 그래서 DB 태스크만 시스템 파이썬으로 실행한다.
+postgresql_ansible_python: /usr/bin/python3
+
+# --- Celery 브로커: Redis Sentinel ------------------------------------------
+redis_port: 6379
+redis_sentinel_port: 26379
+redis_sentinel_master_name: airflow-redis
+redis_sentinel_quorum: 2             # 3노드 → 2 (과반)
+redis_sentinel_down_after_ms: 5000
+redis_sentinel_failover_timeout_ms: 30000
+redis_conf: /etc/redis/redis.conf
+redis_include_conf: /etc/redis/airflow.conf     # 우리가 소유하는 include 파일
+redis_sentinel_conf: /etc/redis/sentinel.conf
+
+# --- 포트 배치 ---------------------------------------------------------------
+# ⚠ api-server 는 8081. 8080 은 Airflow 전용 HAProxy 가 LB 로 점유한다.
+# ⚠ 7000 은 Patroni 쪽 HAProxy stats 가 이미 쓰고 있어 7001 을 쓴다.
+airflow_api_port: 8081
+airflow_worker_log_port: 8793
+airflow_lb_port: 8080
+airflow_lb_stats_port: 7001
+airflow_lb_config: /etc/haproxy/airflow.cfg
+
+# 운영자 진입점 — VIP 를 잡은 노드의 airflow-haproxy 가 3대 api-server 로 분산한다.
+# base_url 이 실제 접속 주소와 다르면 UI 리다이렉트·링크가 깨진다.
+# 앞단에 별도 LB(또는 DNS)를 둔다면 이 값을 그 주소로 바꿀 것.
+airflow_base_url: "http://{{ airflow_cluster_vip }}:{{ airflow_lb_port }}"
+# 워커는 LB 를 거치지 않고 자기 노드 api-server 를 직접 호출한다(단일 장애점 제거).
+airflow_execution_api_url: "http://127.0.0.1:{{ airflow_api_port }}/execution/"
+
+# --- DAG 배포 (rsync) --------------------------------------------------------
+# 컨트롤 노드의 이 경로를 전 노드 {{ airflow_home }}/dags 로 동기화한다.
+airflow_dags_src: "{{ airflow_repo_root }}/dags/"
+airflow_dags_delete: true            # 원본에 없는 파일은 노드에서도 삭제(완전 동기화)
+
+# --- 사이징 ------------------------------------------------------------------
+# 이 노드들은 etcd + PostgreSQL + pgbouncer + HAProxy + keepalived 를 이미 돌린다.
+# Airflow 기본값(worker_concurrency=16)은 과하므로 낮춰 잡는다.
+airflow_worker_concurrency: 4
+airflow_api_workers: 2
+airflow_api_worker_timeout: 120
+airflow_parallelism: 32
+airflow_max_active_tasks_per_dag: 16
+airflow_max_active_runs_per_dag: 8
+airflow_max_tis_per_query: 512
+airflow_parsing_processes: 2
+airflow_min_file_process_interval: 30
+airflow_dag_dir_refresh_interval: 300
+airflow_dag_file_processor_timeout: 50
+airflow_scheduler_heartbeat_sec: 5
+# pgbouncer 와 이중 풀링을 피하려고 작게. pre_ping 은 HAProxy 의
+# on-marked-down shutdown-sessions(페일오버 시 커넥션 강제 종료) 대응으로 필수.
+airflow_sql_pool_size: 5
+airflow_sql_max_overflow: 5
+airflow_sql_pool_recycle: 1800
+airflow_sql_pool_pre_ping: true
+
+# --- 동작 / 표시 -------------------------------------------------------------
+airflow_default_timezone: Asia/Seoul
+airflow_load_examples: false
+airflow_dags_paused_at_creation: true
+airflow_default_task_retries: 1
+airflow_dagbag_import_timeout: 30
+airflow_logging_level: INFO
+airflow_instance_name: AIRFLOW-HA
+airflow_expose_config: "non-sensitive-only"
+airflow_admin_user: admin
+airflow_admin_email: admin@example.com
+
+# --- 방화벽 ------------------------------------------------------------------
+airflow_manage_firewall: true
+# 노드 간 통신을 허용할 대역. 클러스터 내부로 한정한다.
+airflow_cluster_cidr: 192.168.122.0/24

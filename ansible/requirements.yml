@@ -1,0 +1,11 @@
+---
+# ansible-galaxy collection install -r requirements.yml
+# airgap 이면: 인터넷 머신에서 `ansible-galaxy collection download -r requirements.yml`
+# 후 산출 tarball 을 옮겨 `ansible-galaxy collection install <tar>` 로 설치.
+collections:
+  - name: ansible.posix          # synchronize(DAG rsync), seboolean, firewalld
+    version: ">=1.5.0"
+  - name: community.postgresql   # postgresql_db / postgresql_user
+    version: ">=3.0.0"
+  - name: community.general      # 보조 모듈
+    version: ">=8.0.0"

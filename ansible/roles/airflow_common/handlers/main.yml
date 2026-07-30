@@ -1,0 +1,5 @@
+---
+- name: restorecon install root
+  ansible.builtin.command:
+    cmd: restorecon -RF {{ airflow_install_root }}
+  changed_when: true

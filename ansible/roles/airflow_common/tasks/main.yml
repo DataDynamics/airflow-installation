@@ -1,0 +1,137 @@
+---
+# 계정 · 디렉터리 · OS 패키지 · SELinux · firewalld — 모든 노드 공통 기반.
+
+- name: OS 패키지 설치
+  ansible.builtin.dnf:
+    name:
+      - python3.11
+      - python3.11-pip
+      - python3.11-devel
+      - gcc
+      - gcc-c++
+      - make
+      - libpq
+      - libpq-devel
+      - openldap
+      - cyrus-sasl-lib
+      - krb5-libs
+      - redis                     # 브로커. sentinel 바이너리도 이 패키지에 포함
+      - haproxy                   # Airflow UI LB (Patroni 쪽과 별도 인스턴스로 기동)
+      - rsync                     # DAG 배포(synchronize 모듈)
+      - policycoreutils-python-utils
+      - tar
+      - gzip
+      - procps-ng
+    state: present
+
+- name: 그룹 생성
+  ansible.builtin.group:
+    name: "{{ airflow_group }}"
+    system: true
+    state: present
+
+- name: 서비스 계정 생성
+  ansible.builtin.user:
+    name: "{{ airflow_user }}"
+    group: "{{ airflow_group }}"
+    home: "{{ airflow_home }}"
+    shell: /sbin/nologin
+    system: true
+    create_home: false
+    state: present
+
+- name: 디렉터리 생성
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ airflow_user }}"
+    group: "{{ airflow_group }}"
+    mode: "0755"
+  loop:
+    - "{{ airflow_home }}"
+    - "{{ airflow_home }}/dags"
+    - "{{ airflow_home }}/logs"
+    - "{{ airflow_home }}/plugins"
+
+- name: 번들 전개 디렉터리
+  ansible.builtin.file:
+    path: "{{ airflow_stage_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# --- 노드 간 hostname resolve ------------------------------------------------
+# 워커 로그 fetch 가 'hostname:8793' 을 사용한다. 상호 resolve 가 안 되면
+# UI 에서 태스크 로그가 보이지 않는다(이전 검증에서 실측된 요건).
+- name: /etc/hosts 에 클러스터 노드 상호 등록
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^{{ hostvars[item].node_ip }}\s'
+    line: "{{ hostvars[item].node_ip }} {{ item }}"
+    state: present
+  loop: "{{ groups['airflow_cluster'] }}"
+
+# --- SELinux ------------------------------------------------------------------
+- name: SELinux 상태 확인
+  ansible.builtin.command: getenforce
+  register: _selinux
+  changed_when: false
+  failed_when: false
+
+- name: 비표준 설치 경로에 /opt 파일컨텍스트 규칙 상속
+  # INSTALL_ROOT 가 /opt 가 아니면 새 경로에 레이블 규칙이 없어 서비스가 거부된다.
+  ansible.builtin.command:
+    cmd: semanage fcontext -a -e /opt {{ airflow_install_root }}
+  register: _fcontext
+  changed_when: _fcontext.rc == 0
+  failed_when: _fcontext.rc != 0 and 'already defined' not in (_fcontext.stderr | default(''))
+  when:
+    - airflow_manage_selinux | bool
+    - _selinux.stdout | default('Disabled') != 'Disabled'
+    - airflow_install_root != '/opt'
+  notify: restorecon install root
+
+- name: HAProxy 가 임의 포트(api-server 8081)로 연결하도록 허용
+  ansible.posix.seboolean:
+    name: haproxy_connect_any
+    state: true
+    persistent: true
+  when:
+    - airflow_manage_selinux | bool
+    - _selinux.stdout | default('Disabled') != 'Disabled'
+
+# --- firewalld ----------------------------------------------------------------
+# UI(8080)는 운영자 접근이므로 열고, 나머지는 클러스터 대역으로 한정한다.
+- name: firewalld 활성 여부 확인
+  ansible.builtin.systemd:
+    name: firewalld
+  register: _fw
+  failed_when: false
+
+- name: UI LB 포트 개방 (외부 접근)
+  ansible.posix.firewalld:
+    port: "{{ airflow_lb_port }}/tcp"
+    permanent: true
+    immediate: true
+    state: enabled
+  when:
+    - airflow_manage_firewall | bool
+    - _fw.status.ActiveState | default('inactive') == 'active'
+
+- name: 클러스터 내부 통신 포트 개방 (대역 한정)
+  ansible.posix.firewalld:
+    rich_rule: >-
+      rule family="ipv4" source address="{{ airflow_cluster_cidr }}"
+      port port="{{ item }}" protocol="tcp" accept
+    permanent: true
+    immediate: true
+    state: enabled
+  loop:
+    - "{{ airflow_api_port }}"          # api-server (LB 백엔드 + 워커 Execution API)
+    - "{{ airflow_worker_log_port }}"   # 워커 로그 서빙
+    - "{{ redis_port }}"                # Celery 브로커
+    - "{{ redis_sentinel_port }}"       # Sentinel 상호 통신
+  when:
+    - airflow_manage_firewall | bool
+    - _fw.status.ActiveState | default('inactive') == 'active'

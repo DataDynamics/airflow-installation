@@ -1,0 +1,6 @@
+---
+# 실제 재시작은 airflow_services 가 소유한다. 여기서는 플래그만 세운다
+# (설치 직후에는 아직 systemd 유닛이 없을 수 있으므로 조건부).
+- name: restart airflow services
+  ansible.builtin.set_fact:
+    airflow_needs_restart: true

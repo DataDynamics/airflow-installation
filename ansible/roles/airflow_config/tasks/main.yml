@@ -1,0 +1,38 @@
+---
+# airflow.cfg(비밀 없음) + airflow-secrets.env(600, 모든 비밀) 배치.
+# 비밀을 cfg 평문에 두지 않고 AIRFLOW__SECTION__KEY 환경변수로 주입하는 기존 설계를 유지한다.
+
+- name: airflow.cfg 배치
+  ansible.builtin.template:
+    src: airflow.cfg.j2
+    dest: "{{ airflow_home }}/airflow.cfg"
+    owner: "{{ airflow_user }}"
+    group: "{{ airflow_group }}"
+    mode: "0640"
+    backup: true
+  register: _cfg
+
+- name: 비밀 env 파일 배치 (600)
+  ansible.builtin.template:
+    src: airflow-secrets.env.j2
+    dest: "{{ airflow_home }}/airflow-secrets.env"
+    owner: "{{ airflow_user }}"
+    group: "{{ airflow_group }}"
+    mode: "0600"
+  register: _secrets
+  no_log: true
+
+- name: systemd 용 비민감 env 파일
+  ansible.builtin.copy:
+    content: "AIRFLOW_HOME={{ airflow_home }}\n"
+    dest: /etc/systemd/system/airflow.env
+    owner: root
+    group: root
+    mode: "0644"
+  register: _sysenv
+
+# airflow_services 가 이 값을 보고 restarted / started 를 결정한다.
+# (설정 변경이 없으면 무중단 배포에서 서비스를 건드리지 않는다)
+- name: 설정 변경 여부 기록
+  ansible.builtin.set_fact:
+    airflow_config_changed: "{{ (_cfg is changed) or (_secrets is changed) or (_sysenv is changed) }}"

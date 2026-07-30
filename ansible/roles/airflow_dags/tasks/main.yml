@@ -1,0 +1,107 @@
+---
+# DAG 배포 — 컨트롤 노드의 소스 디렉터리를 전 노드로 rsync.
+#
+# 왜 필요한가: 워커는 태스크를 시작할 때 '자기 노드의' dags 폴더에서 DAG 를 파싱한다.
+# 한 노드에만 DAG 가 있으면 다른 노드에 배정된 태스크가
+# 'Dag not found during start up' 으로 3회 재시도 후 실패한다(실측된 요건).
+
+- name: DAG 소스 디렉터리 확인
+  ansible.builtin.stat:
+    path: "{{ airflow_dags_src }}"
+  register: _dags_src
+  delegate_to: localhost
+  run_once: true
+  become: false
+
+- name: 소스가 없으면 건너뜀
+  ansible.builtin.debug:
+    msg: >-
+      DAG 소스 {{ airflow_dags_src }} 없음 — 배포를 건너뜁니다.
+      배포하려면 해당 경로를 만들거나 -e airflow_dags_src=<경로> 로 지정하세요.
+  when: not _dags_src.stat.exists
+  run_once: true
+
+- name: DAG 동기화
+  ansible.posix.synchronize:
+    src: "{{ airflow_dags_src }}"
+    dest: "{{ airflow_home }}/dags/"
+    delete: "{{ airflow_dags_delete | bool }}"
+    recursive: true
+    rsync_opts:
+      - "--exclude=.git"
+      - "--exclude=__pycache__"
+      - "--exclude=*.pyc"
+  become: false          # ansible_user 가 이미 root — become 을 쓰면 rsync 경로가 꼬인다
+  when: _dags_src.stat.exists
+  register: _sync
+
+- name: 소유권 정리
+  ansible.builtin.file:
+    path: "{{ airflow_home }}/dags"
+    owner: "{{ airflow_user }}"
+    group: "{{ airflow_group }}"
+    recurse: true
+    state: directory
+  when: _dags_src.stat.exists and (_sync is changed)
+
+- name: SELinux 레이블 복구
+  ansible.builtin.command:
+    cmd: restorecon -RF {{ airflow_home }}/dags
+  when:
+    - airflow_manage_selinux | bool
+    - _dags_src.stat.exists
+    - _sync is changed
+  changed_when: true
+
+- name: DAG 즉시 등록 (reserialize)
+  # dag-processor 는 refresh_interval(기본 300초) 주기로 디렉터리를 다시 훑는다.
+  # 배포 직후 바로 trigger 하면 'DagNotFound' 가 나므로 여기서 강제로 직렬화한다.
+  ansible.builtin.shell:
+    cmd: |
+      set -a; . {{ airflow_home }}/airflow-secrets.env; set +a
+      exec {{ airflow_venv }}/bin/airflow dags reserialize
+    executable: /bin/bash
+  environment:
+    AIRFLOW_HOME: "{{ airflow_home }}"
+  become: true
+  become_user: "{{ airflow_user }}"
+  run_once: true
+  changed_when: true
+  when:
+    - _dags_src.stat.exists
+    - airflow_dags_reserialize | default(true) | bool
+
+- name: DAG 임포트 오류 확인
+  # 파싱 자체가 깨진 DAG 를 배포하고 지나가면 UI 에서야 발견하게 된다.
+  # 비밀 env 를 source 해야 메타DB 에 붙는다(안 하면 기본 sqlite 로 떨어진다).
+  ansible.builtin.shell:
+    cmd: |
+      set -a; . {{ airflow_home }}/airflow-secrets.env; set +a
+      exec {{ airflow_venv }}/bin/airflow dags list-import-errors --output json
+    executable: /bin/bash
+  environment:
+    AIRFLOW_HOME: "{{ airflow_home }}"
+  become: true
+  become_user: "{{ airflow_user }}"
+  register: _import_errors
+  changed_when: false
+  failed_when: false
+  run_once: true
+  when: _dags_src.stat.exists and (_sync is changed)
+
+- name: 임포트 오류 판정
+  # stdout 에는 JSON 앞뒤로 Airflow 의 로그 줄이 섞인다(graphviz 경고, alembic plugin 등).
+  # 통째로 비교하면 항상 '오류 있음'으로 오탐하므로 JSON 배열 줄만 골라낸다.
+  ansible.builtin.set_fact:
+    _import_errors_json: >-
+      {{ (_import_errors.stdout_lines | default([]) | select('match', '^\s*\[') | list | last | default('[]')) }}
+  when: _import_errors is defined and _import_errors.stdout is defined
+  run_once: true
+
+- name: 임포트 오류 경고
+  ansible.builtin.debug:
+    msg: "⚠ DAG 임포트 오류: {{ _import_errors_json }}"
+  when:
+    - _import_errors_json is defined
+    - _import_errors_json | trim not in ['', '[]']
+  run_once: true

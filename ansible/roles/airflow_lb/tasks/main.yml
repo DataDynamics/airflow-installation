@@ -1,0 +1,81 @@
+---
+# Airflow UI 앞단 로드밸런서.
+#
+# ⚠ 왜 별도 인스턴스인가:
+#   /etc/haproxy/haproxy.cfg 는 Patroni 프로젝트의 roles/haproxy 템플릿이 소유한다.
+#   거기에 Airflow 프론트엔드를 끼워 넣으면 다음 Patroni 플레이북 실행 때 조용히 사라진다.
+#   그래서 설정파일(airflow.cfg)·유닛(airflow-haproxy.service)·PID·stats 포트를 전부 분리했다.
+#   Patroni 쪽: 5000/5001/7000 · Airflow 쪽: {{ airflow_lb_port }}/{{ airflow_lb_stats_port }}
+
+- name: Airflow 전용 HAProxy 설정 배치
+  ansible.builtin.template:
+    src: airflow-haproxy.cfg.j2
+    dest: "{{ airflow_lb_config }}"
+    owner: root
+    group: root
+    mode: "0644"
+    validate: "/usr/sbin/haproxy -c -f %s"
+  notify: reload airflow-haproxy
+
+- name: Airflow 전용 HAProxy 유닛 배치
+  ansible.builtin.template:
+    src: airflow-haproxy.service.j2
+    dest: /etc/systemd/system/airflow-haproxy.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: _lb_unit
+  notify: restart airflow-haproxy
+
+- name: systemd 재로드
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: _lb_unit is changed
+
+- name: Patroni 쪽 HAProxy 를 건드리지 않았는지 확인
+  # 방어적 검증 — 우리 포트가 기존 haproxy.cfg 에 들어가 있으면 설계가 어긋난 것이다.
+  ansible.builtin.command:
+    cmd: grep -c ':{{ airflow_lb_port }}' /etc/haproxy/haproxy.cfg
+  register: _patroni_cfg
+  changed_when: false
+  failed_when: false
+
+- name: 포트 침범 경고
+  ansible.builtin.assert:
+    that: (_patroni_cfg.stdout | int) == 0
+    fail_msg: >-
+      Patroni 의 /etc/haproxy/haproxy.cfg 에 {{ airflow_lb_port }} 가 들어 있습니다.
+      두 인스턴스가 같은 포트를 다투게 됩니다 — 한쪽을 정리하세요.
+
+- name: Airflow HAProxy 기동
+  ansible.builtin.systemd:
+    name: airflow-haproxy
+    enabled: true
+    state: started
+
+# --- keepalived 오인 검사 (⚠ 기존 HA 회귀 방지) --------------------------------
+# Patroni 쪽 keepalived 는 vrrp_script 로 haproxy 생존을 확인해 VIP 를 유지/해제한다.
+# 그 스크립트가 'pidof haproxy' 처럼 프로세스 '이름'만 본다면, 우리가 띄운
+# airflow-haproxy 도 같은 /usr/sbin/haproxy 바이너리라 함께 잡힌다.
+#   → Patroni 의 haproxy(:5000/:5001)가 죽어도 keepalived 는 "살아 있다"고 판단해
+#     VIP 를 넘기지 않는다. 즉 우리 인스턴스가 기존 DB 페일오버를 무력화한다.
+- name: keepalived 헬스체크 방식 확인
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      grep -rhoE 'pidof\s+(-\S+\s+)*haproxy|killall -0 haproxy|pgrep\s+\S*\s*haproxy' \
+        /etc/keepalived/ 2>/dev/null | head -1
+    executable: /bin/bash
+  register: _ka_check
+  changed_when: false
+  failed_when: false
+
+- name: 프로세스 이름 기반 헬스체크 경고
+  ansible.builtin.debug:
+    msg:
+      - "⚠ keepalived 가 프로세스 이름만으로 haproxy 생존을 판단합니다: '{{ _ka_check.stdout | trim }}'"
+      - "  airflow-haproxy 도 같은 바이너리라 함께 잡혀, Patroni 의 haproxy 가 죽어도"
+      - "  VIP 가 넘어가지 않습니다(기존 DB 페일오버 무력화)."
+      - "  조치: patroni-postgresql-ha 의 check_haproxy.sh 를 인스턴스 특정 방식으로 바꿀 것."
+      - "        예) kill -0 \"$(cat /run/haproxy.pid)\"  또는  ss -lntH 'sport = :5000' | grep -q ."
+  when: _ka_check.stdout | trim | length > 0

@@ -1,0 +1,20 @@
+### {{ ansible_managed }}
+[Unit]
+Description=Airflow {{ item.name }}
+After=network-online.target {{ item.after }}
+Wants=network-online.target
+
+[Service]
+User={{ airflow_user }}
+Group={{ airflow_group }}
+# 비밀은 인자가 아니라 EnvironmentFile 로 주입한다(ps 에 노출되지 않도록).
+EnvironmentFile=/etc/systemd/system/airflow.env
+EnvironmentFile={{ airflow_home }}/airflow-secrets.env
+ExecStart={{ airflow_venv }}/bin/airflow {{ item.cmd }}
+Restart=on-failure
+RestartSec=5s
+KillMode=mixed
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,111 @@
+---
+# 실제 서버를 건드리기 전에 토폴로지·산출물·의존 서비스를 검증한다.
+# 여기서 막지 못하면 절반만 배포된 상태로 실패한다.
+
+- name: Sentinel 노드는 홀수 + 최소 3대여야 함 (정족수)
+  ansible.builtin.assert:
+    that:
+      - groups['redis_sentinel'] | default([]) | length >= 3
+      - (groups['redis_sentinel'] | length) % 2 == 1
+    fail_msg: >-
+      redis_sentinel 그룹은 홀수·최소 3대여야 합니다
+      (현재 {{ groups['redis_sentinel'] | default([]) | length }}대).
+      짝수면 정족수를 만들지 못해 브로커 자동 페일오버가 멈춥니다.
+    success_msg: "Sentinel 노드 수 정상: {{ groups['redis_sentinel'] | length }}대"
+  run_once: true
+  delegate_to: localhost
+
+- name: Redis 초기 master 는 정확히 1대여야 함
+  ansible.builtin.assert:
+    that:
+      - >-
+        groups['airflow_cluster']
+        | map('extract', hostvars, 'redis_initial_role')
+        | select('equalto', 'master') | list | length == 1
+    fail_msg: "인벤토리에서 redis_initial_role=master 인 호스트가 정확히 1대가 아닙니다."
+  run_once: true
+  delegate_to: localhost
+
+- name: 공유 비밀(vault)이 채워졌는지 확인
+  ansible.builtin.assert:
+    that:
+      - vault_fernet_key is defined and 'CHANGE_ME' not in vault_fernet_key
+      - vault_api_secret_key is defined and 'CHANGE_ME' not in vault_api_secret_key
+      - vault_jwt_secret is defined and 'CHANGE_ME' not in vault_jwt_secret
+      - vault_db_password is defined and 'CHANGE_ME' not in vault_db_password
+      - vault_redis_password is defined and 'CHANGE_ME' not in vault_redis_password
+      - vault_admin_password is defined and 'CHANGE_ME' not in vault_admin_password
+    fail_msg: "vault 값이 비었거나 CHANGE_ME 입니다 — scripts/gen-vault.sh 를 먼저 실행하세요."
+  run_once: true
+  delegate_to: localhost
+  no_log: true
+
+- name: airgap 번들 존재 확인
+  ansible.builtin.stat:
+    path: "{{ airflow_bundle_src }}"
+  register: _bundle
+  run_once: true
+  delegate_to: localhost
+  become: false
+
+- name: 번들이 없으면 중단
+  ansible.builtin.assert:
+    that: [_bundle.stat.exists]
+    fail_msg: >-
+      번들 없음: {{ airflow_bundle_src }}
+      — 빌드머신에서 build/package.sh 를 먼저 실행하세요.
+  run_once: true
+  delegate_to: localhost
+
+- name: python3.11 존재 확인 (Airflow 3.2+ 는 3.10 미만 미지원)
+  ansible.builtin.stat:
+    path: "{{ airflow_python }}"
+  register: _py
+
+- name: python3.11 없으면 중단
+  ansible.builtin.assert:
+    that: [_py.stat.exists]
+    fail_msg: "{{ inventory_hostname }}: {{ airflow_python }} 없음 — AppStream python3.11 설치 필요"
+
+- name: Patroni REST 응답 확인 (메타DB 의존성)
+  ansible.builtin.uri:
+    url: "http://{{ node_ip }}:{{ patroni_rest_port }}/health"
+    status_code: [200, 503]
+    timeout: 5
+  register: _patroni
+  when: inventory_hostname in groups['patroni_cluster']
+
+- name: 이미 배포된 노드인지 판별 (재실행 여부)
+  ansible.builtin.stat:
+    path: /etc/systemd/system/airflow-api-server.service
+  register: _installed
+
+- name: Airflow 가 쓸 포트가 이미 점유되어 있지 않은지 확인
+  # api-server(8081) / LB(8080) / LB stats(7001) / 워커 로그(8793).
+  # Patroni 쪽 HAProxy 가 5000/5001/7000 을 쓰므로 겹치면 안 된다.
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      ss -lntH "sport = :{{ item }}" | awk '{print $4}' | head -1
+    executable: /bin/bash
+  register: _port_check
+  changed_when: false
+  when: not _installed.stat.exists
+  loop:
+    - "{{ airflow_lb_port }}"
+    - "{{ airflow_lb_stats_port }}"
+    - "{{ airflow_api_port }}"
+    - "{{ airflow_worker_log_port }}"
+    - "{{ airflow_db_port }}"        # 로컬 메타DB RW 리스너(airflow-haproxy)
+
+- name: 포트 충돌이면 중단 (이미 우리 서비스가 쓰는 중이면 무시)
+  ansible.builtin.assert:
+    that: item.stdout | length == 0
+    fail_msg: >-
+      {{ inventory_hostname }}: 포트 {{ item.item }} 가 이미 점유되어 있습니다
+      ({{ item.stdout }}). group_vars 에서 포트를 바꾸거나 기존 프로세스를 정리하세요.
+  loop: "{{ _port_check.results | default([]) }}"
+  loop_control:
+    label: "port {{ item.item }}"
+  # 재실행에서는 우리 서비스가 그 포트를 쓰고 있는 게 정상이므로 검사하지 않는다.
+  when: not _installed.stat.exists

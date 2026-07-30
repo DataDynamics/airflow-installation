@@ -1,0 +1,9 @@
+---
+# DAG 만 전 노드에 재배포한다(서비스 재시작 없음 — dag-processor 가 알아서 다시 읽는다).
+#   ansible-playbook playbooks/deploy-dags.yml
+#   ansible-playbook playbooks/deploy-dags.yml -e airflow_dags_src=/path/to/dags/
+- name: DAG 배포
+  hosts: airflow_cluster
+  gather_facts: false
+  roles:
+    - airflow_dags

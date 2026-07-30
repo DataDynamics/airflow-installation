@@ -1,0 +1,84 @@
+---
+# =============================================================================
+# Airflow 3.x HA (3노드 대칭) — 메인 플레이북
+# -----------------------------------------------------------------------------
+# 메타DB 는 기존 Patroni 클러스터를 그대로 쓴다. Airflow 는 Patroni 를 모르고
+# VIP:5000(HAProxy RW) 하나만 바라본다 — 페일오버는 HAProxy 가 흡수한다.
+#
+#   ansible-playbook site.yml                      # 전체 배포
+#   ansible-playbook site.yml --tags dags          # DAG 만 재배포
+#   ansible-playbook site.yml --tags services      # 롤링 재시작
+#   ansible-playbook site.yml --check --diff       # 드라이런
+#
+# 순서가 이 설계의 핵심이다. 특히 DB 스키마는 정확히 1대에서만 만든다.
+# =============================================================================
+
+- name: 0단계 — 사전 검증
+  hosts: airflow_cluster
+  gather_facts: true
+  tags: [always]
+  roles:
+    - preflight
+
+- name: 1단계 — 기반 (계정·패키지·venv·브로커·설정)
+  hosts: airflow_cluster
+  gather_facts: false
+  tags: [base]
+  roles:
+    - role: airflow_common
+      tags: [common]
+    - role: airflow_venv
+      tags: [venv]
+    - role: redis_ha
+      tags: [redis]
+    - role: airflow_config
+      tags: [config]
+
+- name: 2단계 — 메타DB 부트스트랩 (run_once, Leader 직결)
+  # patroni_cluster 를 함께 포함해야 REST 로 Leader 를 탐색할 수 있다.
+  hosts: airflow_cluster:patroni_cluster
+  gather_facts: false
+  tags: [db]
+  roles:
+    - airflow_db
+
+# DAG 배포보다 먼저 와야 한다 — 이 HAProxy 가 메타DB(127.0.0.1:5433) 경로도 제공하므로,
+# DAG 임포트 검사 같은 DB 접근 태스크가 그 전에 돌면 접속할 곳이 없다.
+- name: 3단계 — 로드밸런서 (UI :8080 + 메타DB RW :5433)
+  hosts: airflow_lb
+  gather_facts: false
+  tags: [lb]
+  roles:
+    - airflow_lb
+
+- name: 4단계 — DAG 배포
+  hosts: airflow_cluster
+  gather_facts: false
+  tags: [dags]
+  roles:
+    - airflow_dags
+
+- name: 5단계 — 서비스 기동 (한 노드씩 · health 게이트)
+  # serial:1 — 한 대를 교체하는 동안 나머지 2대가 트래픽을 받는다.
+  # 앞 노드가 healthy 하지 않으면 다음 노드로 넘어가지 않는다.
+  hosts: airflow_cluster
+  gather_facts: false
+  serial: 1
+  tags: [services]
+  roles:
+    - airflow_services
+
+- name: 완료 안내
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: 접속 정보
+      ansible.builtin.debug:
+        msg:
+          - "UI       : {{ airflow_base_url }}  (admin / vault_admin_password)"
+          - "LB stats : http://{{ airflow_cluster_vip }}:{{ airflow_lb_stats_port }}/"
+          - "health   : curl {{ airflow_base_url }}/api/v2/monitor/health"
+          - "브로커   : Sentinel({{ redis_sentinel_master_name }}) quorum={{ redis_sentinel_quorum }}"
+          - "메타DB   : 각 노드 {{ airflow_db_host }}:{{ airflow_db_port }} → Patroni Leader:{{ patroni_direct_port }} (pgbouncer 우회)"

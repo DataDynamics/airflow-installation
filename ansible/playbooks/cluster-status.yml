@@ -1,0 +1,82 @@
+---
+# 클러스터 상태 한눈에 보기 — 아무것도 변경하지 않는다.
+#   ansible-playbook playbooks/cluster-status.yml
+- name: Airflow HA 클러스터 상태
+  hosts: airflow_cluster
+  gather_facts: false
+  become: true
+  tasks:
+    - name: systemd 서비스 상태
+      ansible.builtin.command:
+        cmd: systemctl is-active airflow-{{ item }}
+      loop: [api-server, scheduler, dag-processor, triggerer, worker, haproxy]
+      register: _svc
+      changed_when: false
+      failed_when: false
+
+    - name: api-server health
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ airflow_api_port }}/api/v2/monitor/health"
+        status_code: [200, 503]
+        timeout: 5
+      register: _health
+      failed_when: false
+
+    - name: Sentinel 이 보는 현재 master
+      ansible.builtin.command:
+        cmd: >-
+          redis-cli -h 127.0.0.1 -p {{ redis_sentinel_port }}
+          {% if redis_sentinel_auth_enabled %}-a {{ vault_redis_password }}{% endif %}
+          sentinel get-master-addr-by-name {{ redis_sentinel_master_name }}
+      register: _master
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: 요약
+      ansible.builtin.debug:
+        msg:
+          - "노드          : {{ inventory_hostname }} ({{ node_ip }})"
+          - "서비스        : {{ _svc.results | map(attribute='stdout') | list | join(' / ') }}"
+          - "health        : {{ _health.json | default({}) | to_json | truncate(200) }}"
+          - "redis master  : {{ _master.stdout_lines | default(['?']) | join(':') }}"
+
+- name: Patroni / Celery 요약
+  hosts: airflow_cluster[0]
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Patroni 클러스터
+      ansible.builtin.command:
+        cmd: patronictl -c /etc/patroni/patroni.yml list
+      register: _patroni
+      changed_when: false
+      failed_when: false
+
+    - name: Celery 워커 등록 현황
+      # raw `celery -b <url>` 를 쓰면 안 된다 — airflow.cfg 를 읽지 않아 Sentinel 의
+      # master_name/sentinel_kwargs 전송 옵션이 빠지고 'master_name transport option
+      # must be specified' 로 실패한다. Airflow 가 구성한 celery app 을 그대로 쓴다.
+      ansible.builtin.shell:
+        cmd: |
+          set -a; . {{ airflow_home }}/airflow-secrets.env; set +a
+          exec {{ airflow_venv }}/bin/python -c '
+          from airflow.providers.celery.executors.celery_executor import app
+          replies = app.control.ping(timeout=10) or []
+          names = [n for r in replies for n in r]
+          print(f"{len(names)} nodes online: " + ", ".join(sorted(names)))
+          '
+        executable: /bin/bash
+      environment:
+        AIRFLOW_HOME: "{{ airflow_home }}"
+      become_user: "{{ airflow_user }}"
+      register: _celery
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: 출력
+      ansible.builtin.debug:
+        msg:
+          - "{{ _patroni.stdout_lines | default([]) }}"
+          - "celery: {{ _celery.stdout | default('(조회 실패)') | trim }}"

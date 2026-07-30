@@ -1,0 +1,12 @@
+---
+- name: reload airflow-haproxy
+  ansible.builtin.systemd:
+    name: airflow-haproxy
+    state: reloaded
+  failed_when: false     # 최초 실행 시 아직 기동 전일 수 있다
+
+- name: restart airflow-haproxy
+  ansible.builtin.systemd:
+    name: airflow-haproxy
+    state: restarted
+    daemon_reload: true

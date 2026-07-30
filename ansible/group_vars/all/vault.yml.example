@@ -1,0 +1,24 @@
+---
+# =============================================================================
+# 공유 비밀 — 실제 파일은 group_vars/all/vault.yml 로 만들고 반드시 암호화한다.
+#
+#   scripts/gen-vault.sh          # 난수로 vault.yml 생성 + 암호화까지 수행
+#   ansible-vault edit group_vars/all/vault.yml
+#
+# ⚠ 아래 3개 키는 "전 노드 동일" 이어야 한다. 특히 JWT 가 다르면 워커가
+#   Execution API 에서 401 을 받는다(3.x 에서 실측된 증상).
+# =============================================================================
+
+# Fernet — Connection/Variable 암호화. 바뀌면 기존 암호값을 복호화할 수 없다.
+vault_fernet_key: "CHANGE_ME_base64_32bytes"
+# api-server 세션 서명키([api] secret_key). LB 로 분산하므로 반드시 동일해야 한다.
+vault_api_secret_key: "CHANGE_ME_hex64"
+# 3.x 신규 — Execution API/UI 토큰 서명키([api_auth] jwt_secret).
+vault_jwt_secret: "CHANGE_ME_hex64"
+
+# 메타DB(Patroni 클러스터의 airflow 롤) 비밀번호.
+vault_db_password: "CHANGE_ME"
+# Redis requirepass / masterauth / sentinel auth-pass — 전부 같은 값을 쓴다.
+vault_redis_password: "CHANGE_ME"
+# Airflow UI 관리자 초기 비밀번호.
+vault_admin_password: "CHANGE_ME"

@@ -1,0 +1,25 @@
+---
+# Airflow 3.x 는 컴포넌트가 4개 서비스로 분리되고, 여기에 celery worker 가 더해진다.
+# 3노드 대칭 구성이므로 모든 노드가 이 5개를 전부 돌린다.
+#   · 스케줄러 다중 기동은 3.x 가 SKIP LOCKED 로 네이티브 지원
+#   · api-server 는 UI/REST 뿐 아니라 Task Execution API 도 서빙하므로 워커 노드에도 필수
+airflow_service_defs:
+  - name: api-server
+    cmd: "api-server --host 0.0.0.0 --port {{ airflow_api_port }}"
+    after: ""
+  - name: scheduler
+    cmd: "scheduler"
+    after: "airflow-api-server.service"
+  - name: dag-processor
+    cmd: "dag-processor"
+    after: ""
+  - name: triggerer
+    cmd: "triggerer"
+    after: ""
+  - name: worker
+    cmd: "celery worker"
+    after: "airflow-api-server.service"
+
+# health 게이트 대기(초) — 노드당 최대 이만큼 기다린 뒤 실패 처리.
+airflow_health_retries: 40
+airflow_health_delay: 5

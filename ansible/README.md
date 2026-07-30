@@ -97,6 +97,27 @@ ansible-playbook playbooks/rolling-restart.yml   # 강제 롤링 재시작
 ansible-playbook playbooks/reset-admin-password.yml  # 관리자 비밀번호를 vault 값으로 재설정
 ```
 
+### teardown (재테스트용)
+
+```bash
+# ① Airflow 만 제거 — Patroni 클러스터는 건드리지 않는다
+ansible-playbook playbooks/teardown.yml -e teardown_confirm=yes
+
+# ② Airflow + 패키지까지
+ansible-playbook playbooks/teardown.yml -e teardown_confirm=yes -e teardown_remove_packages=true
+
+# ③ 랩 완전 초기화 — Patroni/etcd/pgbouncer/keepalived 까지 전부
+ansible-playbook playbooks/teardown.yml -e teardown_confirm=yes \
+  -e teardown_remove_packages=true -e teardown_include_patroni=true
+```
+
+⚠ **되돌릴 수 없다.** 메타DB 스키마·DAG·로그·설정이 사라지므로 `teardown_confirm=yes`
+없이는 아무것도 하지 않는다. 사내 미러 repo(`local-*`)와 범용 OS 도구(gcc/tar/rsync 등)는
+의도적으로 남긴다 — 전자를 지우면 재설치가 불가능해지고, 후자는 이 스택 전용이 아니다.
+
+> `ansible_python_interpreter` 를 시스템 python3 로 고정한다. 자동탐지는 python3.11 을
+> 고르는데 이 플레이북이 그 패키지를 지울 수 있어, 실행 도중 자기 발밑이 무너진다.
+
 ## 실행 순서
 
 `site.yml` 은 6단계로 나뉘며 순서가 곧 안전장치다.

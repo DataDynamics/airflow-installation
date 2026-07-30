@@ -207,14 +207,37 @@ export REDIS_PASSWORD=***     # requirepass/masterauth (전 노드 동일)
 ```
 
 > 주의(설계상 함정, 코드에 반영됨):
-> - sentinel `bind` 는 **0.0.0.0** 를 쓴다(`127.0.0.1 <ip>` 로 두면 원격 master 접속 실패).
+> - sentinel `bind` 는 **0.0.0.0** 를 쓴다. `127.0.0.1 <ip>` 로 두면 첫 주소가 나가는
+>   연결의 소스로 잡혀 원격 master/sentinel 접속이 전부 실패한다.
 > - `master_name` 은 환경변수로 kombu 에 전달되지 않아, `airflow.cfg` 의
 >   `[celery_broker_transport_options]` 섹션에 기록한다(05 가 자동 처리).
+> - **재실행 시 토폴로지는 Sentinel 을 따른다.** 페일오버로 master 가 바뀐 뒤
+>   `REDIS_MASTER_HOST`/`REDIS_ROLE` 는 이미 낡은 값이므로, 04 는 Sentinel 에게
+>   현재 master 를 물어 그쪽으로 수렴한다(Sentinel 이 아무것도 모르는 최초
+>   부트스트랩에서만 인벤토리 값을 쓴다). 이 가드가 없으면 재실행이 현재 master 를
+>   죽은 옛 노드의 replica 로 강등시키거나 이중 master 를 만든다.
+> - **`sentinel.conf` 는 우리 설정이 없을 때만 새로 쓴다.** 매번 덮어쓰면 Sentinel 이
+>   기록해 둔 학습 상태(known-replica/known-sentinel/epoch)가 날아가고 monitor 대상이
+>   부트스트랩 값으로 되돌아간다. 판정은 '파일 존재'가 아니라 **'우리 master 이름이
+>   들어 있는가'** 로 한다 — redis 패키지가 stock `sentinel.conf`(`mymaster`)를 이미
+>   깔아두기 때문에 파일은 항상 존재한다.
+>   강제로 다시 쓰려면 `REDIS_SENTINEL_FORCE_REWRITE=true`(학습 상태 초기화됨).
+
+**설치 후 반드시 확인** — Sentinel 이 정족수를 못 채워도 평소엔 아무 증상이 없고
+master 장애가 나야 드러난다(`get-master-addr-by-name` 은 자기 설정을 되읽어 값을 반환하므로
+"응답이 온다"는 것만으로는 정상 판정이 안 된다). 04 는 매 실행 `flags`(s_down 여부)·
+`num-other-sentinels`·`num-slaves` 를 확인해 경고하며, 전 노드 설치가 끝난 뒤 한 번은
+아래처럼 **강제 검증**을 돌려 둘 것.
+
+```bash
+REDIS_SENTINEL_VERIFY_STRICT=true ./install/04-redis.sh   # 미달이면 실패 처리
+```
 
 주요 변수(전체는 `install/env.sh`): `INSTALL_ROOT`(설치경로), `AIRFLOW_USER`/`CREATE_USER`(계정),
 `RPM_SOURCE`(mirror|bundle|system), `DB_MODE`(local|external), `ROLE`(control|worker),
 `CONTROL_IP`, `REDIS_PASSWORD`, `AF_JWT_SECRET`, `OPEN_FIREWALL`,
-`REDIS_SENTINEL_ENABLED`/`REDIS_SENTINEL_HOSTS`/`REDIS_ROLE`/`REDIS_MASTER_HOST`(Sentinel HA).
+`REDIS_SENTINEL_ENABLED`/`REDIS_SENTINEL_HOSTS`/`REDIS_ROLE`/`REDIS_MASTER_HOST`(Sentinel HA),
+`REDIS_SENTINEL_FORCE_REWRITE`/`REDIS_SENTINEL_VERIFY_STRICT`(Sentinel 재작성·검증).
 
 > OS 패키지 단계(`01-os-packages.sh`)는 **best-effort** 로 동작한다. 오프라인 wheelhouse 가
 > psycopg2-binary 등 빌드 불필요 휠을 담으므로 gcc/`*-devel`/libpq-devel 은 필수가 아니며,

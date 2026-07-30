@@ -114,7 +114,7 @@
     port: "{{ airflow_lb_port }}/tcp"
     permanent: true
     immediate: true
-    state: enabled
+    state: "{{ 'enabled' if airflow_lb_ui_enabled | bool else 'disabled' }}"
   when:
     - airflow_manage_firewall | bool
     - _fw.status.ActiveState | default('inactive') == 'active'

@@ -74,10 +74,24 @@ airflow_lb_port: 8080
 airflow_lb_stats_port: 7001
 airflow_lb_config: /etc/haproxy/airflow.cfg
 
-# 운영자 진입점 — VIP 를 잡은 노드의 airflow-haproxy 가 3대 api-server 로 분산한다.
-# base_url 이 실제 접속 주소와 다르면 UI 리다이렉트·링크가 깨진다.
-# 앞단에 별도 LB(또는 DNS)를 둔다면 이 값을 그 주소로 바꿀 것.
-airflow_base_url: "http://{{ airflow_cluster_vip }}:{{ airflow_lb_port }}"
+# --- airflow-haproxy 인스턴스가 제공하는 두 리스너 (독립 토글) -----------------
+# ① UI 로드밸런서 (:8080 → 3× api-server :8081) — 기본 off.
+#    앞단에 외부 LB·리버스프록시를 두는 구성이면 켤 필요가 없다.
+#    켜면 airflow_base_url 도 그에 맞게 바꿀 것(실제 접속 주소와 다르면 UI 링크가 깨진다).
+airflow_lb_ui_enabled: false
+#
+# ② 메타DB RW 프록시 (127.0.0.1:5433 → 현재 Patroni Leader:5432) — 기본 on.
+#    ⚠ 이걸 끄면 Airflow 가 메타DB 에 접속할 방법이 사라진다. 끄려면 airflow_db_host/
+#      airflow_db_port 를 다른 엔드포인트로 반드시 함께 바꿔야 한다.
+#      (Patroni 의 VIP:5000 은 pgbouncer 경유라 airflow 롤 인증이 실패한다 — 위 주석 참조)
+airflow_db_proxy_enabled: true
+
+# 운영자 진입점. base_url 이 실제 접속 주소와 다르면 UI 리다이렉트·링크가 깨진다.
+#   · UI LB 를 켜면      → VIP:8080 (haproxy 가 3대 api-server 로 분산)
+#   · 끄면(기본)          → VIP:8081 (VIP 를 쥔 노드의 api-server 로 직접)
+# 앞단에 외부 LB·DNS 를 둔다면 이 값을 그 주소로 바꿀 것.
+airflow_base_url: >-
+  http://{{ airflow_cluster_vip }}:{{ airflow_lb_port if airflow_lb_ui_enabled | bool else airflow_api_port }}
 # 워커는 LB 를 거치지 않고 자기 노드 api-server 를 직접 호출한다(단일 장애점 제거).
 airflow_execution_api_url: "http://127.0.0.1:{{ airflow_api_port }}/execution/"
 

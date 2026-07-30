@@ -31,6 +31,7 @@ flowchart TB
   현재 Leader 를 찾아 PostgreSQL 에 직결한다. **pgbouncer 는 거치지 않는다** (아래 참조).
 - **브로커**: Redis Sentinel (master 1 + replica 2, quorum 2).
 - **UI LB**: Patroni 의 `haproxy.cfg` 를 건드리지 않는 **전용 인스턴스**(`airflow-haproxy.service`).
+  **기본은 꺼져 있다** — 앞단에 외부 LB 를 두는 구성이 흔하기 때문. `airflow_lb_ui_enabled=true` 로 켠다.
 - **워커의 Execution API**: LB 를 거치지 않고 `127.0.0.1:8081` — 자기 노드 api-server 를 호출한다.
 
 > **왜 pgbouncer 를 우회하나**: Patroni 의 HAProxy(:5000)는 pgbouncer 를 거치는데,
@@ -38,6 +39,28 @@ flowchart TB
 > Patroni 프로젝트 템플릿이 **3명(appuser/postgres/pgbouncer_admin)으로 하드코딩**해 소유한다.
 > `airflow` 롤을 끼워 넣어도 다음 Patroni 실행 때 지워지고 `SASL authentication failed` 가 난다.
 > 우회하면 pgbouncer 의 `default_pool_size(=25)` 경합과 transaction 풀링 위험도 함께 사라진다.
+
+### HAProxy 두 리스너 (독립 토글)
+
+`airflow-haproxy` 인스턴스 하나가 서로 다른 두 가지를 제공하며, 각각 따로 켜고 끈다.
+
+| 변수 | 기본 | 역할 |
+|------|------|------|
+| `airflow_db_proxy_enabled` | **true** | `127.0.0.1:5433` → 현재 Patroni Leader `:5432` |
+| `airflow_lb_ui_enabled` | **false** | `:8080` → 3× api-server `:8081` (+ stats `:7001`) |
+
+```bash
+ansible-playbook site.yml -e airflow_lb_ui_enabled=true   # UI LB 켜기
+```
+
+⚠ **`airflow_db_proxy_enabled` 를 끄면 Airflow 가 메타DB 에 접속할 방법이 사라진다.**
+끄려면 `airflow_db_host`/`airflow_db_port` 를 도달 가능한 다른 엔드포인트로 반드시 함께 바꿀 것
+(Patroni 의 VIP:5000 은 pgbouncer 경유라 `airflow` 롤 인증이 실패한다 — 위 참조).
+둘 다 끄면 role 이 `airflow-haproxy` 인스턴스를 아예 제거한다.
+
+`airflow_base_url` 은 토글을 따라간다 — UI LB 를 켜면 `VIP:8080`, 끄면 `VIP:8081`
+(VIP 를 쥔 노드의 api-server 로 직접). 실제 접속 주소와 다르면 UI 링크가 깨지므로,
+앞단에 외부 LB·DNS 를 둔다면 이 값을 그 주소로 바꿀 것.
 
 > **외부 접근**: 이 저장소는 클러스터 내부까지만 책임진다. 운영자 브라우저가 VIP 대역에
 > 닿지 않는 환경이라면 앞단에 LB·리버스프록시·DNS 를 별도로 두고, `airflow_base_url` 을
@@ -47,11 +70,11 @@ flowchart TB
 
 | 포트 | 주인 | 비고 |
 |------|------|------|
-| 8080 | **airflow-haproxy** | UI 진입점 (VIP 경유) |
-| 5433 | **airflow-haproxy** | 메타DB RW → Patroni Leader (127.0.0.1 전용) |
+| 5433 | **airflow-haproxy** | 메타DB RW → Patroni Leader (127.0.0.1 전용). `airflow_db_proxy_enabled` **기본 on** |
+| 8080 | **airflow-haproxy** | UI 진입점 (VIP 경유). `airflow_lb_ui_enabled` **기본 off** |
 | 8081 | airflow api-server | LB 백엔드 + 워커 Execution API |
 | 8793 | celery worker | 태스크 로그 서빙 |
-| 7001 | airflow-haproxy stats | Patroni 쪽 stats(7000)와 분리 |
+| 7001 | airflow-haproxy stats | Patroni 쪽 stats(7000)와 분리. UI LB 를 켤 때만 열린다 |
 | 6379 / 26379 | redis / sentinel | 클러스터 대역만 개방 |
 | 5000 / 5001 / 7000 | **Patroni 소유** | 건드리지 않음 |
 

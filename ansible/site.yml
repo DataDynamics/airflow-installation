@@ -44,7 +44,8 @@
 
 # DAG 배포보다 먼저 와야 한다 — 이 HAProxy 가 메타DB(127.0.0.1:5433) 경로도 제공하므로,
 # DAG 임포트 검사 같은 DB 접근 태스크가 그 전에 돌면 접속할 곳이 없다.
-- name: 3단계 — 로드밸런서 (UI :8080 + 메타DB RW :5433)
+# UI LB(:8080)는 airflow_lb_ui_enabled 로 켠다(기본 off). 메타DB 프록시는 기본 on.
+- name: 3단계 — HAProxy (메타DB RW + 선택적 UI LB)
   hosts: airflow_lb
   gather_facts: false
   tags: [lb]
@@ -78,7 +79,7 @@
       ansible.builtin.debug:
         msg:
           - "UI       : {{ airflow_base_url }}  (admin / vault_admin_password)"
-          - "LB stats : http://{{ airflow_cluster_vip }}:{{ airflow_lb_stats_port }}/"
+          - "{{ 'LB stats : http://' ~ airflow_cluster_vip ~ ':' ~ airflow_lb_stats_port ~ '/' if airflow_lb_ui_enabled | bool else 'UI LB   : 꺼짐 (airflow_lb_ui_enabled=true 로 활성화)' }}"
           - "health   : curl {{ airflow_base_url }}/api/v2/monitor/health"
           - "브로커   : Sentinel({{ redis_sentinel_master_name }}) quorum={{ redis_sentinel_quorum }}"
           - "메타DB   : 각 노드 {{ airflow_db_host }}:{{ airflow_db_port }} → Patroni Leader:{{ patroni_direct_port }} (pgbouncer 우회)"

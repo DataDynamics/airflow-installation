@@ -7,6 +7,39 @@
 #   그래서 설정파일(airflow.cfg)·유닛(airflow-haproxy.service)·PID·stats 포트를 전부 분리했다.
 #   Patroni 쪽: 5000/5001/7000 · Airflow 쪽: {{ airflow_lb_port }}/{{ airflow_lb_stats_port }}
 
+# 두 리스너가 모두 꺼져 있으면 이 인스턴스를 띄울 이유가 없다.
+- name: 두 토글이 모두 꺼져 있으면 인스턴스 제거 후 종료
+  when: not (airflow_lb_ui_enabled | bool) and not (airflow_db_proxy_enabled | bool)
+  block:
+    - name: airflow-haproxy 중지·비활성
+      ansible.builtin.systemd:
+        name: airflow-haproxy
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: 설정·유닛 제거
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ airflow_lb_config }}"
+        - /etc/systemd/system/airflow-haproxy.service
+
+    - name: systemd 재로드
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: 안내
+      ansible.builtin.debug:
+        msg: >-
+          airflow_lb_ui_enabled / airflow_db_proxy_enabled 가 모두 false 입니다.
+          메타DB 접속은 airflow_db_host({{ airflow_db_host }}:{{ airflow_db_port }})가
+          다른 경로로 도달 가능해야 동작합니다.
+
+    - name: 이후 태스크 건너뛰기
+      ansible.builtin.meta: end_host
+
 - name: Airflow 전용 HAProxy 설정 배치
   ansible.builtin.template:
     src: airflow-haproxy.cfg.j2
@@ -33,6 +66,7 @@
   when: _lb_unit is changed
 
 - name: Patroni 쪽 HAProxy 를 건드리지 않았는지 확인
+  when: airflow_lb_ui_enabled | bool
   # 방어적 검증 — 우리 포트가 기존 haproxy.cfg 에 들어가 있으면 설계가 어긋난 것이다.
   ansible.builtin.command:
     cmd: grep -c ':{{ airflow_lb_port }}' /etc/haproxy/haproxy.cfg
@@ -41,6 +75,7 @@
   failed_when: false
 
 - name: 포트 침범 경고
+  when: airflow_lb_ui_enabled | bool
   ansible.builtin.assert:
     that: (_patroni_cfg.stdout | int) == 0
     fail_msg: >-
@@ -60,6 +95,7 @@
 #   → Patroni 의 haproxy(:5000/:5001)가 죽어도 keepalived 는 "살아 있다"고 판단해
 #     VIP 를 넘기지 않는다. 즉 우리 인스턴스가 기존 DB 페일오버를 무력화한다.
 - name: keepalived 헬스체크 방식 확인
+  when: airflow_lb_ui_enabled | bool
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
@@ -71,6 +107,9 @@
   failed_when: false
 
 - name: 프로세스 이름 기반 헬스체크 경고
+  when:
+    - airflow_lb_ui_enabled | bool
+    - _ka_check.stdout | default('') | trim | length > 0
   ansible.builtin.debug:
     msg:
       - "⚠ keepalived 가 프로세스 이름만으로 haproxy 생존을 판단합니다: '{{ _ka_check.stdout | trim }}'"
@@ -78,4 +117,3 @@
       - "  VIP 가 넘어가지 않습니다(기존 DB 페일오버 무력화)."
       - "  조치: patroni-postgresql-ha 의 check_haproxy.sh 를 인스턴스 특정 방식으로 바꿀 것."
       - "        예) kill -0 \"$(cat /run/haproxy.pid)\"  또는  ss -lntH 'sport = :5000' | grep -q ."
-  when: _ka_check.stdout | trim | length > 0

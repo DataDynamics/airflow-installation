@@ -1,7 +1,8 @@
 ### {{ ansible_managed }}
-### Airflow UI 전용 HAProxy — Patroni 의 haproxy.cfg 와 완전히 분리된 인스턴스.
-### VIP({{ airflow_cluster_vip }})를 잡은 노드가 :{{ airflow_lb_port }} 로 들어온 요청을
-### 3대 api-server(:{{ airflow_api_port }})에 분산한다.
+### Airflow 전용 HAProxy — Patroni 의 haproxy.cfg 와 완전히 분리된 인스턴스.
+### 두 리스너를 독립 토글로 제공한다(group_vars 주석 참조):
+###   · 메타DB RW  127.0.0.1:{{ airflow_db_port }} → 현재 Patroni Leader   [{{ '켜짐' if airflow_db_proxy_enabled | bool else '꺼짐' }}]
+###   · UI LB      :{{ airflow_lb_port }} → 3× api-server:{{ airflow_api_port }}          [{{ '켜짐' if airflow_lb_ui_enabled | bool else '꺼짐' }}]
 
 global
     log         /dev/log local0
@@ -21,13 +22,16 @@ defaults
     timeout server  {{ airflow_lb_timeout }}
     timeout http-request 15s
 
+{% if airflow_lb_ui_enabled | bool %}
 listen stats
     bind *:{{ airflow_lb_stats_port }}
     stats enable
     stats uri /
     stats refresh 10s
     stats show-node
+{% endif %}
 
+{% if airflow_db_proxy_enabled | bool %}
 # ---- 메타DB 쓰기 경로 — 항상 '현재 Patroni Leader' 한 곳으로만 ----
 #   Patroni 의 /primary 는 리더에서만 HTTP 200, 나머지는 503 을 반환한다.
 #   따라서 200 을 주는 노드 = 현재 리더 로 자동 판별된다(Patroni 프로젝트와 동일 패턴).
@@ -48,7 +52,9 @@ listen airflow_pg_primary
 {% for h in groups['patroni_cluster'] %}
     server {{ h }} {{ hostvars[h].node_ip }}:{{ patroni_direct_port }} check port {{ patroni_rest_port }}
 {% endfor %}
+{% endif %}
 
+{% if airflow_lb_ui_enabled | bool %}
 frontend airflow_ui
     bind *:{{ airflow_lb_port }}
     default_backend airflow_api
@@ -65,3 +71,4 @@ backend airflow_api
 {% for h in groups['airflow_cluster'] %}
     server {{ h }} {{ hostvars[h].node_ip }}:{{ airflow_api_port }} check cookie {{ h }}
 {% endfor %}
+{% endif %}

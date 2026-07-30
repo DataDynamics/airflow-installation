@@ -331,11 +331,25 @@ KVM 호스트(`10.0.1.50`)에 진입점을 만든다.
 | secrets env 를 bash 로 source 하면 오작동 | `BROKER_URL` 의 `;` 를 bash 가 명령 구분자로 해석, `SENTINEL_KWARGS` 의 JSON 따옴표가 벗겨짐 | 값을 **작은따옴표로 감쌈**(systemd·bash 양쪽 안전) |
 | DAG 배포 직후 `trigger` 가 `DagNotFound` | dag-processor 의 디렉터리 스캔 주기 300초 | 배포 후 `airflow dags reserialize` 수행 |
 
-### ⚠ 남은 조율 대상 — keepalived 헬스체크 (우리가 만든 회귀)
+### ✅ keepalived 헬스체크 — 해결 완료 (`patroni-postgresql-ha` commit `d08ea4a`)
 Patroni 쪽 `check_haproxy.sh` 가 `pidof haproxy` 한 줄이라, 같은 바이너리를 쓰는
-`airflow-haproxy` 까지 함께 잡힌다. **Patroni 의 haproxy 가 죽어도 VIP 가 넘어가지 않는다.**
-`airflow_lb` role 이 이를 감지해 경고하지만, 실제 수정은 Patroni 프로젝트에서 해야 한다
-(`kill -0 "$(cat /run/haproxy.pid)"` 또는 `:5000` 리스닝 확인처럼 인스턴스 특정 방식으로).
+`airflow-haproxy` 까지 함께 잡혀 **Patroni 의 haproxy 가 죽어도 VIP 가 넘어가지 않았다**.
+우리가 만든 회귀였으므로 그쪽 저장소에서 수정했다 —
+`pgrep -f "-f /etc/haproxy/haproxy.cfg"`(설정파일로 인스턴스 특정) +
+`ss -lntH "sport = :5000"`(실제 서빙 확인).
+
+검증: Patroni haproxy 만 중지하고 `airflow-haproxy` 는 살려둔 상태
+(`pidof haproxy` 는 여전히 PID 반환)에서 **VIP 가 약 11초 만에 이동**, 복구 시 preempt 로 원복.
+
+> **함정 2개** — 같은 문제를 다시 만나면 여기부터 볼 것:
+> ① **PID 파일 방식은 불가.** SELinux Enforcing 에서 `keepalived_t` 는
+>   `haproxy_var_run_t`(=`/run/haproxy.pid`)를 읽지 못한다. 그러면 정상 노드까지
+>   전부 실패 판정된다. 이 거부는 **dontaudit 라 `ausearch` 에 남지 않고**,
+>   모든 노드 priority 가 똑같이 내려가 상대 순위는 유지되므로 겉보기엔 정상처럼 보인다.
+>   (뒤집어 말하면 **헬스체크가 상시 실패해도 증상이 드러나지 않는다** — 반드시 실제로
+>   장애를 주입해 VIP 이동을 확인해야 한다.)
+> ② **Keepalived 는 최소 환경에서 스크립트를 실행한다.** PATH 가 비어 있어 `ss` 같은
+>   외부 명령을 이름만으로 부르면 실패한다. 옛 스크립트가 `/bin/pidof` 절대경로를 쓴 이유다.
 
 ---
 
@@ -352,7 +366,6 @@ Patroni switchover 중 24/24 success · Redis master 페일오버 후 24/24 succ
 
 남은 작업:
 
-1. **keepalived 헬스체크 수정** (§8-A 하단) — Patroni 프로젝트 쪽. 우선순위 높음.
-2. §7-B(tuning profile `minimal` → `small` 이상) — Patroni 프로젝트 쪽.
-3. flower(:5555) 등 미사용 경로, `RPM_SOURCE=bundle` 완전 오프라인 경로 검증.
-4. 운영 전 `admin/admin` 비밀번호 교체 (`playbooks/reset-admin-password.yml`).
+1. §7-B(tuning profile `minimal` → `small` 이상) — Patroni 프로젝트 쪽.
+2. flower(:5555) 등 미사용 경로, `RPM_SOURCE=bundle` 완전 오프라인 경로 검증.
+3. 운영 전 `admin/admin` 비밀번호 교체 (`playbooks/reset-admin-password.yml`).

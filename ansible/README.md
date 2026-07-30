@@ -156,12 +156,15 @@ airflow dags trigger ha_failover_test          # 실행 중 장애 주입
 
 ## 알려진 조율 대상 (Patroni 프로젝트 쪽)
 
-- **⚠ keepalived 의 haproxy 헬스체크가 프로세스 이름 기반이다** — `check_haproxy.sh` 가
-  `pidof haproxy` 한 줄이라, 같은 바이너리를 쓰는 `airflow-haproxy` 까지 함께 잡힌다.
-  그 결과 **Patroni 의 haproxy 가 죽어도 VIP 가 넘어가지 않는다**(기존 DB 페일오버 무력화).
-  이 저장소를 배포하면 생기는 부작용이므로 반드시 함께 고쳐야 한다:
-  `kill -0 "$(cat /run/haproxy.pid)"` 또는 `ss -lntH 'sport = :5000' | grep -q .` 처럼
-  **인스턴스를 특정**하는 방식으로 변경할 것. `airflow_lb` role 이 이 상태를 감지해 경고한다.
+- **✅ keepalived 헬스체크 — 해결됨** (`patroni-postgresql-ha` commit `d08ea4a`).
+  `check_haproxy.sh` 가 `pidof haproxy` 한 줄이라 같은 바이너리를 쓰는 `airflow-haproxy`
+  까지 잡혀, Patroni 의 haproxy 가 죽어도 VIP 가 넘어가지 않았다. 설정파일(`pgrep -f`)과
+  RW 포트(`ss`)로 **인스턴스를 특정**하도록 수정했다.
+  `airflow_lb` role 이 옛 방식이 남아 있으면 감지해 경고한다.
+  > ⚠ PID 파일 방식은 쓰면 안 된다 — SELinux Enforcing 에서 `keepalived_t` 가
+  > `haproxy_var_run_t` 를 읽지 못해 **정상 노드까지 전부** 실패로 판정된다.
+  > 이 거부는 dontaudit 라 `ausearch` 에도 남지 않고, 모든 노드 priority 가 똑같이
+  > 내려가 상대 순위는 유지되므로 겉보기엔 정상처럼 보인다.
 
 - **`postgresql_tuning_profile: minimal`(4 GB 기준)** — 16 GB 노드에는 과소. `small` 이상 권장.
   `patroni-postgresql-ha` 쪽 변수라 별도 조율이 필요하다.

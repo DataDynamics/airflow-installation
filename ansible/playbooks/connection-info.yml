@@ -1,0 +1,181 @@
+---
+# =============================================================================
+# 접속 정보 출력 — 아무것도 변경하지 않는다(전 태스크 읽기 전용).
+# -----------------------------------------------------------------------------
+#   ansible-playbook playbooks/connection-info.yml
+#   ansible-playbook playbooks/connection-info.yml -e show_secrets=true   # 비밀번호까지
+#
+# UI 주소·계정, 메타DB/브로커 접속 문자열에 더해 "실행해 봐야 아는 값"
+# (현재 VIP 보유 노드 · Patroni Leader · Redis master)을 실제로 조회해 한 장으로 낸다.
+#
+# ⚠ 기본은 비밀번호를 가린다. show_secrets=true 를 주면 vault 값이 화면에 그대로
+#   찍히므로 화면 공유·로그 수집 중에는 쓰지 말 것.
+# =============================================================================
+
+- name: 현재 상태 조회
+  hosts: airflow_cluster
+  gather_facts: false
+  become: true
+  tasks:
+    - name: VIP 보유 여부
+      ansible.builtin.command:
+        cmd: ip -4 -o addr show
+      register: _addr
+      changed_when: false
+      failed_when: false
+
+    - name: Patroni Leader 여부 (REST /primary — 리더만 200)
+      ansible.builtin.uri:
+        url: "http://{{ node_ip }}:{{ patroni_rest_port }}/primary"
+        status_code: [200, 503]
+        timeout: 5
+      register: _primary
+      changed_when: false
+      failed_when: false
+
+    - name: Sentinel 이 보는 현재 master
+      ansible.builtin.command:
+        cmd: >-
+          redis-cli -h 127.0.0.1 -p {{ redis_sentinel_port }}
+          sentinel get-master-addr-by-name {{ redis_sentinel_master_name }}
+      environment: >-
+        {{ {'REDISCLI_AUTH': vault_redis_password}
+           if (redis_sentinel_auth_enabled | default(true) | bool) else {} }}
+      register: _master
+      changed_when: false
+      failed_when: false
+      no_log: true                      # 환경변수에 비밀번호가 실린다
+
+    - name: systemd 서비스 상태
+      ansible.builtin.command:
+        cmd: "systemctl is-active airflow-{{ item }}"
+      loop: [api-server, scheduler, dag-processor, triggerer, worker, haproxy]
+      register: _svc
+      changed_when: false
+      failed_when: false
+
+    - name: api-server health
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ airflow_api_port }}/api/v2/monitor/health"
+        status_code: [200, 503]
+        timeout: 5
+      register: _health
+      changed_when: false
+      failed_when: false
+
+    # 뒤 play 에서 hostvars 로 모아 쓴다. 불리언 대신 '해당 노드 이름 또는 빈 문자열'로
+    # 두면 select() 한 번으로 걸러지고, 문자열/불리언 변환 문제도 생기지 않는다.
+    - name: 노드 요약 정리
+      ansible.builtin.set_fact:
+        _vip_here: "{{ inventory_hostname if (' ' ~ airflow_cluster_vip ~ '/') in (_addr.stdout | default('')) else '' }}"
+        _leader_here: "{{ inventory_hostname if (_primary.status | default(0) | int) == 200 else '' }}"
+        _redis_master: "{{ _master.stdout_lines | default([]) | join(':') }}"
+        _status_line: >-
+          {{ '  %-12s : %s   [health %s]' | format(
+               inventory_hostname,
+               _svc.results | map(attribute='item') | zip(_svc.results | map(attribute='stdout'))
+                            | map('join', '=') | join(' '),
+               'OK' if (_health.status | default(0) | int) == 200 else 'NG') }}
+
+- name: 접속 정보 출력
+  # 클러스터 전체 정보를 한 번만 출력한다(연결은 이미 앞 play 에서 끝났다).
+  hosts: airflow_cluster[0]
+  gather_facts: false
+  tasks:
+    - name: 표시용 값 계산
+      vars:
+        _reveal: "{{ show_secrets | default(false) | bool }}"
+      ansible.builtin.set_fact:
+        _pw_admin: "{{ vault_admin_password if _reveal else '********' }}"
+        _pw_db: "{{ vault_db_password if _reveal else '********' }}"
+        _pw_redis: "{{ vault_redis_password if _reveal else '********' }}"
+        _vip_holder: >-
+          {{ groups['airflow_cluster'] | map('extract', hostvars, '_vip_here')
+             | select() | join(', ') | default('(보유 노드 없음)', true) }}
+        _leader: >-
+          {{ groups['airflow_cluster'] | map('extract', hostvars, '_leader_here')
+             | select() | join(', ') | default('(탐색 실패)', true) }}
+        _redis_master_addr: >-
+          {{ groups['airflow_cluster'] | map('extract', hostvars, '_redis_master')
+             | select() | first | default('(조회 실패)', true) }}
+      no_log: true                      # 이 태스크의 출력에 비밀값이 실린다
+
+    - name: 접속 정보
+      ansible.builtin.debug:
+        msg: "{{ _head + _ui + _api + _db + _broker + _status + _ops + _files }}"
+      vars:
+        _sep: "════════════════════════════════════════════════════════════════════"
+        _node_urls: >-
+          {{ groups['airflow_cluster'] | map('extract', hostvars, 'node_ip')
+             | map('regex_replace', '^(.*)$', 'http://\1:' ~ airflow_api_port) | join('  ') }}
+        _sentinels: >-
+          {{ groups['redis_sentinel'] | map('extract', hostvars, 'node_ip')
+             | map('regex_replace', '^(.*)$', '\1:' ~ redis_sentinel_port) | join('  ') }}
+        _ssh_targets: >-
+          {{ groups['airflow_cluster'] | map('extract', hostvars, 'ansible_host')
+             | map('regex_replace', '^(.*)$', (ansible_user | default('root')) ~ '@\1') | join('  ') }}
+        _pw_hint: "{{ '' if show_secrets | default(false) | bool else '   (-e show_secrets=true 로 표시)' }}"
+        _dsn: >-
+          postgresql://{{ airflow_db_user }}:{{ _pw_db }}@{{ airflow_db_host }}:{{ airflow_db_port }}/{{ airflow_db_name
+          }}?sslmode={{ airflow_db_sslmode }}
+        _psql: >-
+          PGPASSWORD='{{ _pw_db }}' psql -h {{ airflow_db_host }} -p {{ airflow_db_port }}
+          -U {{ airflow_db_user }} {{ airflow_db_name }}
+        _sentinel_cli: >-
+          REDISCLI_AUTH='{{ _pw_redis }}' redis-cli -p {{ redis_sentinel_port }}
+          sentinel get-master-addr-by-name {{ redis_sentinel_master_name }}
+        _head:
+          - "{{ _sep }}"
+          - " Airflow HA 접속 정보 — {{ airflow_instance_name }} (Airflow {{ airflow_version }}, {{ groups['airflow_cluster'] | length }}노드)"
+          - "{{ _sep }}"
+        _ui:
+          - "[웹 UI]"
+          - "  주소       : {{ airflow_base_url }}"
+          - "  계정       : {{ airflow_admin_user }} / {{ _pw_admin }}{{ _pw_hint }}"
+          - "  경로       : {{ 'VIP:' ~ airflow_lb_port ~ ' → airflow-haproxy → 3× api-server:' ~ airflow_api_port
+                               if airflow_lb_ui_enabled | bool
+                               else 'VIP 보유 노드의 api-server:' ~ airflow_api_port ~ ' 직결 (UI LB 꺼짐)' }}"
+          - "  VIP        : {{ airflow_cluster_vip }}  (현재 보유: {{ _vip_holder }})"
+          - "  노드 직결  : {{ _node_urls }}"
+          - "  LB stats   : {{ 'http://' ~ airflow_cluster_vip ~ ':' ~ airflow_lb_stats_port ~ '/'
+                               if airflow_lb_ui_enabled | bool
+                               else '(UI LB 꺼짐 — -e airflow_lb_ui_enabled=true 로 켠다)' }}"
+        _api:
+          - ""
+          - "[REST API]"
+          - "  health     : curl -s {{ airflow_base_url }}/api/v2/monitor/health"
+          - "  토큰 발급  : TOKEN=$(curl -s -X POST {{ airflow_base_url }}/auth/token \\"
+          - "                 -H 'Content-Type: application/json' \\"
+          - "                 -d '{\"username\":\"{{ airflow_admin_user }}\",\"password\":\"{{ _pw_admin }}\"}' | jq -r .access_token)"
+          - "  DAG 목록   : curl -s -H \"Authorization: Bearer $TOKEN\" {{ airflow_base_url }}/api/v2/dags"
+        _db:
+          - ""
+          - "[메타DB — 기존 Patroni 클러스터]"
+          - "  Airflow 경로 : {{ airflow_db_host }}:{{ airflow_db_port }} (각 노드 로컬 airflow-haproxy)"
+          - "                 → 현재 Leader {{ _leader }}:{{ patroni_direct_port }} 직결 (pgbouncer 우회)"
+          - "  DSN          : {{ _dsn }}"
+          - "  psql         : {{ _psql }}"
+          - "  Patroni      : patronictl -c /etc/patroni/patroni.yml list"
+        _broker:
+          - ""
+          - "[브로커 — Redis Sentinel]"
+          - "  Sentinel     : {{ _sentinels }}"
+          - "  master_name  : {{ redis_sentinel_master_name }}  (quorum {{ redis_sentinel_quorum }})"
+          - "  현재 master  : {{ _redis_master_addr }}"
+          - "  조회         : {{ _sentinel_cli }}"
+        _status: "{{ ['', '[서비스 상태]  (api-server/scheduler/dag-processor/triggerer/worker/haproxy)']
+                     + (groups['airflow_cluster'] | map('extract', hostvars, '_status_line') | list) }}"
+        _ops:
+          - ""
+          - "[SSH / CLI]"
+          - "  ssh          : {{ _ssh_targets }}"
+          - "  airflow CLI  : sudo -u {{ airflow_user }} bash -c 'set -a; . {{ airflow_home }}/airflow-secrets.env; set +a; \\"
+          - "                   AIRFLOW_HOME={{ airflow_home }} {{ airflow_venv }}/bin/airflow dags list'"
+          - "  로그         : journalctl -u airflow-scheduler -f    (api-server/worker/triggerer/dag-processor 동일)"
+        _files:
+          - ""
+          - "[경로]"
+          - "  AIRFLOW_HOME : {{ airflow_home }}   (dags/ · logs/ · airflow.cfg · airflow-secrets.env)"
+          - "  venv         : {{ airflow_venv }}"
+          - "  HAProxy      : {{ airflow_lb_config }}  (airflow-haproxy.service)"
+          - "{{ _sep }}"

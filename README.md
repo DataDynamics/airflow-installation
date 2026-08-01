@@ -8,6 +8,16 @@ CeleryExecutor 다중 노드(Phase 2, 1 control + 3 celery)로 확장한다.
 > (시스템 기본 python3(3.9)는 건드리지 않음). 자세한 설계는 [`DESIGN.md`](./DESIGN.md),
 > 3경로(Phase 1 / 모드 B / 모드 A) 검증 결과는 [`VERIFICATION.md`](./VERIFICATION.md) 참고.
 
+**명령 사용법은 `./help.sh` 로 본다** (아무것도 실행하지 않고 명령만 출력한다):
+
+```bash
+./help.sh            # 전체
+./help.sh ha         # Ansible HA 배포 (3노드 · Patroni 위)
+./help.sh info       # 접속 정보 출력
+./help.sh test       # 테스트 / 검증
+./help.sh build      # 빌드·패키징        ./help.sh single|teardown|vars|docs
+```
+
 ---
 
 ## 1. 전체 파이프라인 (빌드 ↔ airgap 경계)
@@ -253,6 +263,10 @@ build/    build-wheelhouse-{docker,rhel}.sh · extract-rpms-{docker,rhel}.sh   #
 install/  00~06 · install-all.sh · env.sh           # 대상 설치 (오프라인)
           gen-cluster-keys.sh · 99-teardown.sh
 deploy/   deploy-cluster.sh · print-node-commands.sh # Phase2 배포 (모드 A/B)
+ansible/  site.yml · roles/ · playbooks/            # 3노드 HA (Patroni 위) 배포·운영
+          playbooks/connection-info.yml             #   접속 정보 출력
+          playbooks/smoke-test.yml                  #   스모크 테스트
+help.sh                                              # 사용법 출력 (실행 안 함)
 DESIGN.md                                            # 설계서 + AS-BUILT
 ```
 

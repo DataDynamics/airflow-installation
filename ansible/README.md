@@ -114,11 +114,29 @@ ansible-playbook site.yml --limit pg-node-2
 보조 플레이북:
 
 ```bash
+ansible-playbook playbooks/connection-info.yml   # 접속 정보 한 장 (무변경)
+ansible-playbook playbooks/smoke-test.yml        # 스모크 테스트 (PASS/FAIL 표)
 ansible-playbook playbooks/cluster-status.yml    # 상태 점검 (무변경)
 ansible-playbook playbooks/deploy-dags.yml       # DAG 배포
 ansible-playbook playbooks/rolling-restart.yml   # 강제 롤링 재시작
 ansible-playbook playbooks/reset-admin-password.yml  # 관리자 비밀번호를 vault 값으로 재설정
 ```
+
+> 명령 사용법 전체는 저장소 루트의 `./help.sh` 로도 볼 수 있다
+> (`./help.sh ha|info|test|build|single|teardown|vars`).
+
+## 접속 정보
+
+```bash
+ansible-playbook playbooks/connection-info.yml                      # 비밀번호는 가림
+ansible-playbook playbooks/connection-info.yml -e show_secrets=true # 비밀번호까지 표시
+```
+
+UI 주소·관리자 계정, REST 호출 예시(health · JWT 발급 · DAG 목록), 메타DB DSN/psql,
+Sentinel 목록, SSH/CLI/journalctl, 주요 경로를 한 번에 낸다. 실행해 봐야 아는 값
+— **현재 VIP 보유 노드 · Patroni Leader · Redis master** — 은 실제 노드에서 조회해 채운다.
+
+⚠ `show_secrets=true` 는 vault 비밀번호를 화면에 그대로 찍는다. 화면 공유·로그 수집 중에는 쓰지 말 것.
 
 ### teardown (재테스트용)
 
@@ -176,6 +194,25 @@ ansible-playbook playbooks/deploy-dags.yml -e airflow_dags_src=/path/to/dags/
   파싱하므로, 한 노드에만 있으면 다른 노드에 배정된 태스크가 `Dag not found during start up` 으로 실패한다.
 
 ## 검증 항목
+
+```bash
+ansible-playbook playbooks/smoke-test.yml                        # 전체 (DAG 실행 포함)
+ansible-playbook playbooks/smoke-test.yml -e smoke_run_dag=false # 읽기 전용 항목만
+ansible-playbook playbooks/smoke-test.yml -e smoke_dag=ha_failover_test
+```
+
+| 범위 | 항목 |
+|------|------|
+| 노드 | T1 systemd 5서비스 · T2 api-server health(4컴포넌트) · T3 메타DB 접속 · T4 워커 로그서버 포트 · T5 Sentinel 응답 |
+| 클러스터 | T6 UI 진입점 · T7 로그인(JWT 발급) · T8 인증 REST 호출 · T9 DAG 임포트 오류 · T10 Celery 워커 등록 수 · T11 Sentinel master 합의 · T12 DAG 실행 E2E(성공률 + 워커 분산) |
+
+실패해도 중간에 멈추지 않는다 — 전 항목을 끝까지 돌린 뒤 PASS/FAIL 표를 내고 **마지막에**
+실패시킨다(한 번 실행으로 고장난 곳을 모두 본다).
+
+⚠ `smoke_run_dag`(기본 true)는 DAG 를 unpause 하고 실제로 한 번 실행한다 — 메타DB 에 DAG 런이
+남는다. 운영 클러스터에서는 `false` 로 돌릴 것.
+
+수동 확인:
 
 ```bash
 curl http://192.168.122.100:8080/api/v2/monitor/health     # 4개 컴포넌트 healthy

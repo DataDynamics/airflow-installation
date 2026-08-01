@@ -1,0 +1,378 @@
+---
+# =============================================================================
+# 스모크 테스트 — 배포된 클러스터가 실제로 동작하는지 끝에서 끝까지 확인한다.
+# -----------------------------------------------------------------------------
+#   ansible-playbook playbooks/smoke-test.yml                      # 전체(DAG 실행 포함)
+#   ansible-playbook playbooks/smoke-test.yml -e smoke_run_dag=false   # 읽기 전용만
+#   ansible-playbook playbooks/smoke-test.yml -e smoke_dag=ha_failover_test
+#
+# 검사 항목
+#   [노드]    systemd 5서비스 · api-server health · 메타DB 접속 · 로그서버 포트 · Sentinel
+#   [클러스터] Sentinel master 합의 · UI 진입점 · 로그인(JWT) · 인증 API · DAG 임포트 오류
+#             · Celery 워커 등록 수 · DAG 실행 E2E(성공률 + 워커 분산)
+#
+# ⚠ smoke_run_dag=true(기본)면 DAG 를 unpause 하고 실제로 한 번 실행한다.
+#   메타DB 에 DAG 런이 남는다는 뜻이므로, 운영 클러스터에서는 false 로 돌릴 것.
+# 실패해도 중간에 멈추지 않는다 — 전 항목을 끝까지 돌린 뒤 요약을 내고 마지막에 실패시킨다.
+# =============================================================================
+
+- name: 노드별 점검
+  hosts: airflow_cluster
+  gather_facts: false
+  become: true
+  tasks:
+    - name: T1 systemd 서비스 상태
+      ansible.builtin.command:
+        cmd: "systemctl is-active airflow-{{ item }}"
+      loop: [api-server, scheduler, dag-processor, triggerer, worker]
+      register: _svc
+      changed_when: false
+      failed_when: false
+
+    - name: T2 api-server health
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ airflow_api_port }}/api/v2/monitor/health"
+        status_code: [200, 503]
+        timeout: 10
+      register: _health
+      changed_when: false
+      failed_when: false
+
+    - name: T3 메타DB 접속 (로컬 haproxy:{{ airflow_db_port }} → Patroni Leader)
+      ansible.builtin.shell:
+        cmd: |
+          set -a; . {{ airflow_home }}/airflow-secrets.env; set +a
+          exec {{ airflow_venv }}/bin/airflow db check
+        executable: /bin/bash
+      environment:
+        AIRFLOW_HOME: "{{ airflow_home }}"
+      become_user: "{{ airflow_user }}"
+      register: _dbcheck
+      changed_when: false
+      failed_when: false
+      no_log: true                      # 환경파일에 DSN(비밀번호 포함)이 들어 있다
+
+    - name: T4 워커 로그 서버 포트 리슨
+      ansible.builtin.command:
+        cmd: ss -lntH "sport = :{{ airflow_worker_log_port }}"
+      register: _logport
+      changed_when: false
+      failed_when: false
+
+    - name: T5 Sentinel 응답 / 현재 master
+      ansible.builtin.command:
+        cmd: >-
+          redis-cli -h 127.0.0.1 -p {{ redis_sentinel_port }}
+          sentinel get-master-addr-by-name {{ redis_sentinel_master_name }}
+      environment: >-
+        {{ {'REDISCLI_AUTH': vault_redis_password}
+           if (redis_sentinel_auth_enabled | default(true) | bool) else {} }}
+      register: _master
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: 노드 결과 집계
+      ansible.builtin.set_fact:
+        _redis_master: "{{ _master.stdout_lines | default([]) | join(':') }}"
+        _node_results:
+          - name: "T1 systemd 서비스(5)"
+            ok: "{{ _svc.results | map(attribute='stdout') | select('equalto', 'active') | list | length == 5 }}"
+            detail: >-
+              {{ _svc.results | map(attribute='item') | zip(_svc.results | map(attribute='stdout'))
+                 | map('join', '=') | join(' ') }}
+          - name: "T2 api-server health"
+            ok: >-
+              {{ (_health.status | default(0) | int) == 200
+                 and (_health.json.metadatabase.status | default('')) == 'healthy'
+                 and (_health.json.scheduler.status | default('')) == 'healthy'
+                 and (_health.json.triggerer.status | default('')) == 'healthy' }}
+            detail: >-
+              {%- set j = _health.json | default({}) -%}
+              {%- set parts = [] -%}
+              {%- for k in ['metadatabase', 'scheduler', 'triggerer', 'dag_processor'] -%}
+                {%- set _ = parts.append(k ~ '=' ~ (j.get(k, {}).get('status', '?'))) -%}
+              {%- endfor -%}
+              http {{ _health.status | default(0) }} · {{ parts | join(' ') }}
+          - name: "T3 메타DB 접속"
+            ok: "{{ (_dbcheck.rc | default(1)) == 0 }}"
+            detail: "{{ airflow_db_host }}:{{ airflow_db_port }} → Leader (rc={{ _dbcheck.rc | default('?') }})"
+          - name: "T4 로그서버 :{{ airflow_worker_log_port }}"
+            ok: "{{ (_logport.stdout | default('')) | length > 0 }}"
+            detail: "{{ '리슨 중' if (_logport.stdout | default('')) | length > 0 else '리슨 없음 — worker 미기동?' }}"
+          - name: "T5 Sentinel 응답"
+            ok: "{{ (_master.stdout_lines | default([])) | length == 2 }}"
+            detail: "master = {{ _master.stdout_lines | default(['?']) | join(':') }}"
+
+- name: 클러스터 단위 점검
+  # 노드 하나에서 대표로 수행한다 — 여기서 보는 것은 전부 클러스터 공통 자원이다.
+  # (컨트롤 노드가 VIP 대역에 닿지 않아도 되도록, 호출은 노드에서 나간다)
+  hosts: airflow_cluster[0]
+  gather_facts: false
+  become: true
+  vars:
+    smoke_dag: ha_worker_distribution_test
+    smoke_run_dag: true
+    smoke_run_retries: 60               # × 5초 = 최대 5분 대기
+    smoke_run_delay: 5
+  tasks:
+    - name: T6 UI 진입점 도달 ({{ airflow_base_url }})
+      ansible.builtin.uri:
+        url: "{{ airflow_base_url }}/api/v2/monitor/health"
+        status_code: [200, 503]
+        timeout: 10
+      register: _ui
+      changed_when: false
+      failed_when: false
+
+    - name: T7 로그인 — JWT 토큰 발급
+      ansible.builtin.uri:
+        url: "{{ airflow_base_url }}/auth/token"
+        method: POST
+        body_format: json
+        body:
+          username: "{{ airflow_admin_user }}"
+          password: "{{ vault_admin_password }}"
+        status_code: [200, 201]
+        timeout: 10
+      register: _token
+      changed_when: false
+      failed_when: false
+      no_log: true                      # 요청 본문에 관리자 비밀번호가 들어간다
+
+    - name: 인증 헤더 준비
+      ansible.builtin.set_fact:
+        _token_ok: "{{ (_token.json.access_token | default('')) | length > 0 }}"
+        _auth_hdr:
+          Authorization: "Bearer {{ _token.json.access_token | default('') }}"
+      no_log: true
+
+    - name: T8 인증 REST 호출 (/api/v2/dags)
+      ansible.builtin.uri:
+        url: "{{ airflow_base_url }}/api/v2/dags?limit=100"
+        headers: "{{ _auth_hdr }}"
+        status_code: [200]
+        timeout: 10
+      register: _dags
+      changed_when: false
+      failed_when: false
+      when: _token_ok | bool
+
+    - name: T9 DAG 임포트 오류 조회
+      ansible.builtin.uri:
+        url: "{{ airflow_base_url }}/api/v2/importErrors?limit=100"
+        headers: "{{ _auth_hdr }}"
+        status_code: [200]
+        timeout: 10
+      register: _imperr
+      changed_when: false
+      failed_when: false
+      when: _token_ok | bool
+
+    - name: T10 Celery 워커 등록 현황
+      # raw `celery -b <url>` 를 쓰면 안 된다 — airflow.cfg 를 읽지 않아 Sentinel 의
+      # master_name/sentinel_kwargs 전송 옵션이 빠지고 실패한다. Airflow 의 celery app 을 쓴다.
+      ansible.builtin.shell:
+        cmd: |
+          set -a; . {{ airflow_home }}/airflow-secrets.env; set +a
+          exec {{ airflow_venv }}/bin/python -c '
+          from airflow.providers.celery.executors.celery_executor import app
+          replies = app.control.ping(timeout=15) or []
+          print(",".join(sorted(n for r in replies for n in r)))
+          '
+        executable: /bin/bash
+      environment:
+        AIRFLOW_HOME: "{{ airflow_home }}"
+      become_user: "{{ airflow_user }}"
+      register: _celery
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    # --- E2E: 실제로 DAG 를 한 번 돌린다 -------------------------------------
+    - name: E2E 준비
+      when: smoke_run_dag | bool
+      block:
+        - name: DAG 존재 확인
+          ansible.builtin.uri:
+            url: "{{ airflow_base_url }}/api/v2/dags/{{ smoke_dag }}"
+            headers: "{{ _auth_hdr }}"
+            status_code: [200, 404]
+            timeout: 10
+          register: _dag
+          changed_when: false
+          failed_when: false
+
+        - name: DAG 이 없으면 여기서 안내하고 건너뛴다
+          ansible.builtin.set_fact:
+            _e2e_skip: "{{ not (_token_ok | bool) or (_dag.status | default(0) | int) != 200 }}"
+
+        - name: DAG unpause
+          ansible.builtin.shell:
+            cmd: |
+              set -a; . {{ airflow_home }}/airflow-secrets.env; set +a
+              exec {{ airflow_venv }}/bin/airflow dags unpause {{ smoke_dag }}
+            executable: /bin/bash
+          environment:
+            AIRFLOW_HOME: "{{ airflow_home }}"
+          become_user: "{{ airflow_user }}"
+          register: _unpause
+          changed_when: false
+          failed_when: false
+          no_log: true
+          when: not _e2e_skip | bool
+
+        - name: 실행 ID 생성
+          ansible.builtin.set_fact:
+            _run_id: "smoke-{{ lookup('pipe', 'date +%Y%m%dT%H%M%S') }}"
+          when: not _e2e_skip | bool
+
+        - name: DAG 트리거
+          ansible.builtin.shell:
+            cmd: |
+              set -a; . {{ airflow_home }}/airflow-secrets.env; set +a
+              exec {{ airflow_venv }}/bin/airflow dags trigger {{ smoke_dag }} -r {{ _run_id }}
+            executable: /bin/bash
+          environment:
+            AIRFLOW_HOME: "{{ airflow_home }}"
+          become_user: "{{ airflow_user }}"
+          register: _trigger
+          changed_when: true
+          failed_when: false
+          no_log: true
+          when: not _e2e_skip | bool
+
+        - name: 완료 대기 (최대 {{ (smoke_run_retries | int) * (smoke_run_delay | int) }}초)
+          ansible.builtin.uri:
+            url: "{{ airflow_base_url }}/api/v2/dags/{{ smoke_dag }}/dagRuns/{{ _run_id }}"
+            headers: "{{ _auth_hdr }}"
+            status_code: [200, 404]
+            timeout: 10
+          register: _run
+          changed_when: false
+          failed_when: false
+          retries: "{{ smoke_run_retries }}"
+          delay: "{{ smoke_run_delay }}"
+          until: (_run.json.state | default('')) in ['success', 'failed']
+          when:
+            - not _e2e_skip | bool
+            - (_trigger.rc | default(1)) == 0
+
+        - name: 태스크 인스턴스 조회 (실행 노드 분포)
+          ansible.builtin.uri:
+            url: "{{ airflow_base_url }}/api/v2/dags/{{ smoke_dag }}/dagRuns/{{ _run_id }}/taskInstances?limit=500"
+            headers: "{{ _auth_hdr }}"
+            status_code: [200]
+            timeout: 15
+          register: _tis
+          changed_when: false
+          failed_when: false
+          when:
+            - not _e2e_skip | bool
+            - (_trigger.rc | default(1)) == 0
+
+        - name: 분포 계산
+          ansible.builtin.set_fact:
+            _ti_total: "{{ _tis.json.task_instances | default([]) | length }}"
+            _ti_success: "{{ _tis.json.task_instances | default([]) | selectattr('state', 'equalto', 'success') | list | length }}"
+            _ti_hosts: >-
+              {{ _tis.json.task_instances | default([]) | map(attribute='hostname', default='')
+                 | select() | list | unique | sort | join(', ') }}
+          when:
+            - not _e2e_skip | bool
+            - (_trigger.rc | default(1)) == 0
+
+    - name: 클러스터 결과 집계
+      vars:
+        _sentinel_masters: >-
+          {{ groups['airflow_cluster'] | map('extract', hostvars, '_redis_master')
+             | select() | list | unique }}
+        _workers: "{{ (_celery.stdout | default('') | trim).split(',') | select() | list }}"
+      ansible.builtin.set_fact:
+        _cluster_results:
+          - name: "T6 UI 진입점"
+            ok: "{{ (_ui.status | default(0) | int) == 200 }}"
+            detail: "{{ airflow_base_url }} → http {{ _ui.status | default('연결 실패') }}"
+          - name: "T7 로그인(JWT 발급)"
+            ok: "{{ _token_ok | bool }}"
+            detail: "{{ 'POST /auth/token → 토큰 수신 (' ~ airflow_admin_user ~ ')'
+                        if _token_ok | bool
+                        else 'http ' ~ (_token.status | default('?')) ~ ' — 계정/비밀번호(vault_admin_password) 확인' }}"
+          - name: "T8 인증 REST 호출"
+            ok: "{{ (_dags.status | default(0) | int) == 200 }}"
+            detail: >-
+              {{ ('DAG ' ~ (_dags.json.total_entries | default('?')) ~ '개 조회')
+                 if (_dags.status | default(0) | int) == 200
+                 else ('호출 실패 (http ' ~ (_dags.status | default('토큰 없음')) ~ ')') }}
+          - name: "T9 DAG 임포트 오류"
+            ok: "{{ (_imperr.json.total_entries | default(-1) | int) == 0 }}"
+            detail: >-
+              {{ '없음' if (_imperr.json.total_entries | default(-1) | int) == 0
+                 else ((_imperr.json.total_entries | string) ~ '건 — 노드에서 dags list-import-errors 로 확인'
+                       if _imperr.json.total_entries is defined
+                       else '조회 실패 (http ' ~ (_imperr.status | default('토큰 없음')) ~ ')') }}
+          - name: "T10 Celery 워커 등록"
+            ok: "{{ _workers | length == groups['airflow_cluster'] | length }}"
+            detail: >-
+              {{ _workers | length }}/{{ groups['airflow_cluster'] | length }} online
+              — {{ _workers | join(' ') | default('(없음)', true) }}
+          - name: "T11 Sentinel master 합의"
+            ok: "{{ _sentinel_masters | length == 1 }}"
+            detail: >-
+              {{ ('전 노드 동일: ' ~ _sentinel_masters[0]) if _sentinel_masters | length == 1
+                 else ('불일치! ' ~ (_sentinel_masters | join(' vs '))) }}
+          - name: "T12 DAG 실행 E2E ({{ smoke_dag }})"
+            ok: >-
+              {{ true if not (smoke_run_dag | bool)
+                 else ((_run.json.state | default('')) == 'success'
+                       and (_ti_total | default(0) | int) > 0
+                       and (_ti_success | default(0) | int) == (_ti_total | default(0) | int)) }}
+            detail: >-
+              {{ '건너뜀 (-e smoke_run_dag=false)' if not (smoke_run_dag | bool)
+                 else ('DAG 미배포 — playbooks/deploy-dags.yml 먼저 실행' if _e2e_skip | default(true) | bool
+                 else (_run_id | default('?') ~ ' state=' ~ (_run.json.state | default('타임아웃'))
+                       ~ ' · 태스크 ' ~ (_ti_success | default(0)) ~ '/' ~ (_ti_total | default(0)) ~ ' success'
+                       ~ ' · 실행 노드: ' ~ (_ti_hosts | default('?', true)))) }}
+
+    # --- 요약 -----------------------------------------------------------------
+    - name: 요약 출력
+      vars:
+        _sep: "════════════════════════════════════════════════════════════════════"
+        _node_rows: >-
+          {%- set rows = [] -%}
+          {%- for h in groups['airflow_cluster'] -%}
+            {%- for r in hostvars[h]._node_results -%}
+              {%- set _ = rows.append('  %-9s %-4s %-22s %s' | format(
+                    h, ('PASS' if r.ok | bool else 'FAIL'), r.name, r.detail | trim)) -%}
+            {%- endfor -%}
+          {%- endfor -%}
+          {{ rows }}
+        _cluster_rows: >-
+          {%- set rows = [] -%}
+          {%- for r in _cluster_results -%}
+            {%- set _ = rows.append('  %-4s %-26s %s' | format(
+                  ('PASS' if r.ok | bool else 'FAIL'), r.name, r.detail | trim)) -%}
+          {%- endfor -%}
+          {{ rows }}
+      ansible.builtin.debug:
+        msg: >-
+          {{ [_sep, ' 스모크 테스트 결과 — ' ~ airflow_instance_name ~ ' (Airflow ' ~ airflow_version ~ ')', _sep,
+              '[노드별]'] + _node_rows + ['', '[클러스터]'] + _cluster_rows + [_sep] }}
+
+    - name: 실패 항목이 있으면 실패로 종료
+      vars:
+        _failed: >-
+          {%- set f = [] -%}
+          {%- for h in groups['airflow_cluster'] -%}
+            {%- for r in hostvars[h]._node_results if not r.ok | bool -%}
+              {%- set _ = f.append(h ~ '/' ~ r.name) -%}
+            {%- endfor -%}
+          {%- endfor -%}
+          {%- for r in _cluster_results if not r.ok | bool -%}
+            {%- set _ = f.append(r.name) -%}
+          {%- endfor -%}
+          {{ f }}
+      ansible.builtin.assert:
+        that: _failed | length == 0
+        fail_msg: "실패 {{ _failed | length }}건 — {{ _failed | join(', ') }}"
+        success_msg: "전 항목 PASS — 클러스터 정상"

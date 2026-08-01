@@ -3,7 +3,7 @@
 # 이 저장소 사용법 출력기. 아무것도 실행하지 않고 명령만 보여준다.
 #
 #   ./help.sh              # 전체
-#   ./help.sh ha           # Ansible HA 배포 (3노드 · Patroni 위)
+#   ./help.sh ha           # Ansible HA 배포 (3노드 · 메타DB patroni|external)
 #   ./help.sh info         # 접속 정보 확인
 #   ./help.sh test         # 테스트 / 검증
 #   ./help.sh build        # 빌드·패키징 (인터넷 빌드머신)
@@ -22,7 +22,7 @@ h() { printf '\n%s%s%s\n' "$B$C" "$1" "$R"; }
 note() { printf '%s%s%s\n' "$Y" "$1" "$R"; }
 
 topic_ha() {
-  h "■ Ansible HA 배포 — 3노드 대칭 (기존 Patroni PostgreSQL 클러스터 위)"
+  h "■ Ansible HA 배포 — 3노드 대칭 (메타DB: 기존 Patroni 클러스터 또는 임의 PostgreSQL)"
   cat <<'EOF'
   작업 디렉터리는 항상 ansible/ 이다 (ansible.cfg 가 인벤토리·vault 경로를 잡는다).
 
@@ -32,13 +32,18 @@ topic_ha() {
     ansible-galaxy collection install -r requirements.yml   # 컬렉션
     ./scripts/gen-vault.sh                                  # 비밀 생성 → group_vars/all/vault.yml + .vault_pass
     vi inventory/hosts.yml                                   # 노드 IP · redis_initial_role
+    #   메타DB 가 Patroni 가 아니면: group_vars 에서 airflow_db_backend=external (아래 '배포' 참고)
     ls ../dist/airflow-3.3.0-airgap-bundle.tar.gz            # airgap 번들 (없으면 ./help.sh build)
 
   배포
     ansible all -m ping                        # 연결 확인
     ansible-playbook site.yml --tags always    # 사전 검증만 (읽기 전용)
-    ansible-playbook site.yml                  # 전체 배포
+    ansible-playbook site.yml                  # 전체 배포 (메타DB = 기존 Patroni 클러스터)
     ansible-playbook site.yml --check --diff   # 드라이런
+
+    #  Patroni 가 아닌 PostgreSQL 에 얹을 때 (자세히는 ./help.sh vars)
+    ansible-playbook site.yml -e airflow_db_backend=external \
+      -e airflow_db_external_host=10.0.1.60 -e airflow_db_external_port=5432
 
   부분 실행
     ansible-playbook site.yml --tags dags      # DAG 만 재배포
@@ -65,7 +70,7 @@ topic_info() {
   출력 내용
     · 웹 UI 주소 · 관리자 계정 · 현재 VIP 보유 노드 · 노드 직결 URL
     · REST API 호출 예시 (health · JWT 토큰 발급 · DAG 목록)
-    · 메타DB DSN/psql 명령 + 현재 Patroni Leader
+    · 메타DB DSN/psql 명령 (patroni 백엔드면 현재 Leader 도 함께)
     · Redis Sentinel 목록 + 현재 master
     · 노드별 서비스 상태 · SSH/CLI/journalctl · 주요 경로
 
@@ -135,7 +140,7 @@ topic_single() {
     CONTROL_IP=192.168.0.1 WORKER_IPS="192.168.0.2 192.168.0.3" \
       ./deploy/print-node-commands.sh
 EOF
-  note "  3노드 HA(Patroni 위)를 쓸 거면 이 경로 대신 ./help.sh ha 를 볼 것."
+  note "  3노드 HA 를 쓸 거면 이 경로 대신 ./help.sh ha 를 볼 것(메타DB 는 Patroni 든 아니든 된다)."
 }
 
 topic_teardown() {
@@ -163,7 +168,7 @@ topic_vars() {
     airflow_db_bootstrap       external 일 때 롤/DB 를 여기서 만들지            기본 true
     airflow_cluster_vip        VIP (Keepalived, Patroni 프로젝트 소유)          기본 192.168.122.100
     airflow_lb_ui_enabled      UI 로드밸런서(:8080) 켜기                         기본 false
-    airflow_db_proxy_enabled   메타DB RW 프록시(127.0.0.1:5433) — 끄면 접속 불가  기본 true
+    airflow_db_proxy_enabled   메타DB RW 프록시(127.0.0.1:5433)     백엔드를 따라감(external 이면 off)
     airflow_base_url           운영자 진입 주소(실제 접속 주소와 달라지면 UI 링크가 깨진다)
     airflow_api_port / 8081    api-server (8080 은 LB 가 점유)
     airflow_worker_concurrency 워커 동시 실행 수                                 기본 4
@@ -203,7 +208,7 @@ usage() {
   ./help.sh [주제]
 
     (없음)     전체 출력
-    ha         Ansible HA 배포 (3노드 · Patroni 위)   ← 기본 경로
+    ha         Ansible HA 배포 (3노드 · 메타DB patroni|external)  ← 기본 경로
     info       접속 정보 출력
     test       테스트 / 검증
     build      빌드·패키징 (인터넷 빌드머신)

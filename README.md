@@ -12,7 +12,7 @@ CeleryExecutor 다중 노드(Phase 2, 1 control + 3 celery)로 확장한다.
 
 ```bash
 ./help.sh            # 전체
-./help.sh ha         # Ansible HA 배포 (3노드 · Patroni 위)
+./help.sh ha         # Ansible HA 배포 (3노드 · 메타DB 는 Patroni 또는 임의 PostgreSQL)
 ./help.sh info       # 접속 정보 출력
 ./help.sh test       # 테스트 / 검증
 ./help.sh build      # 빌드·패키징        ./help.sh single|teardown|vars|docs
@@ -256,21 +256,62 @@ REDIS_SENTINEL_VERIFY_STRICT=true ./install/04-redis.sh   # 미달이면 실패 
 
 ---
 
-## 6. 저장소 구조
+## 6. 3노드 HA (Ansible) — 메타DB 백엔드 선택
+
+위 bash 경로(Phase 1·2)와 별개로, **3노드 대칭 HA** 구성은 `ansible/` 로 배포한다.
+모든 노드가 Airflow 전 서비스(api-server·scheduler·dag-processor·triggerer·celery worker)와
+Redis Sentinel 을 함께 돌린다. 자세한 내용은 [`ansible/README.md`](./ansible/README.md),
+설계 배경은 [`AIRFLOW-HA-ANSIBLE-DESIGN.md`](./AIRFLOW-HA-ANSIBLE-DESIGN.md).
+
+**메타DB 는 Patroni 를 전제하지 않는다.** `airflow_db_backend` 로 고른다.
+
+| 값 | 대상 | Airflow 가 붙는 곳 | 롤/DB 생성 방식 |
+|----|------|--------------------|-----------------|
+| `patroni` (기본) | 기존 Patroni PostgreSQL HA 클러스터 | 각 노드 `127.0.0.1:5433` → REST 로 찾은 현재 Leader | Leader 노드에 위임, `postgres` **peer 인증**(비밀번호 불필요) |
+| `external` | 단일 서버 · 다른 HA · 관리형 DB | `airflow_db_external_host:port` **직접** | 네트워크 접속, `airflow_db_admin_user` + `vault_db_admin_password` |
+
+```bash
+cd ansible
+./scripts/gen-vault.sh                     # 공유 비밀 1회 생성
+ansible-playbook site.yml                  # ① Patroni 위 (기본)
+
+# ② Patroni 아닌 PostgreSQL 위
+ansible-playbook site.yml \
+  -e airflow_db_backend=external \
+  -e airflow_db_external_host=10.0.1.60 -e airflow_db_external_port=5432
+#   롤/DB 를 DBA 가 미리 만들어 주면: -e airflow_db_bootstrap=false
+```
+
+`external` 로 두면 메타DB 프록시(`:5433`)가 자동으로 꺼지고, 인벤토리의 `patroni_cluster`
+그룹도 필요 없다. preflight 는 Patroni REST 대신 **엔드포인트 TCP 도달성을 전 노드에서** 확인한다.
+
+> ⚠ `external` 은 **DB HA 를 책임지지 않는다.** 뒤가 단일 서버면 메타DB 가 단일 장애점이고,
+> HA 라면 페일오버를 흡수할 RW 엔드포인트(VIP·프록시)를 그쪽에서 제공해야 한다.
+
+운영·검증:
+
+```bash
+ansible-playbook playbooks/connection-info.yml   # 접속 정보 한 장 (무변경)
+ansible-playbook playbooks/smoke-test.yml        # 스모크 테스트 (PASS/FAIL 표)
+```
+
+---
+
+## 7. 저장소 구조
 ```
 build/    build-wheelhouse-{docker,rhel}.sh · extract-rpms-{docker,rhel}.sh   # 빌드/추출
           os-packages.list · package.sh                                      # 목록/패키징
 install/  00~06 · install-all.sh · env.sh           # 대상 설치 (오프라인)
           gen-cluster-keys.sh · 99-teardown.sh
 deploy/   deploy-cluster.sh · print-node-commands.sh # Phase2 배포 (모드 A/B)
-ansible/  site.yml · roles/ · playbooks/            # 3노드 HA (Patroni 위) 배포·운영
+ansible/  site.yml · roles/ · playbooks/            # 3노드 HA 배포·운영 (메타DB: patroni|external)
           playbooks/connection-info.yml             #   접속 정보 출력
           playbooks/smoke-test.yml                  #   스모크 테스트
 help.sh                                              # 사용법 출력 (실행 안 함)
 DESIGN.md                                            # 설계서 + AS-BUILT
 ```
 
-## 7. Airflow 2.11 → 3.3 주요 변경 요약 (이 저장소 관점)
+## 8. Airflow 2.11 → 3.3 주요 변경 요약 (이 저장소 관점)
 
 | 항목 | 2.11 (구) | 3.3.0 (현재) |
 |---|---|---|

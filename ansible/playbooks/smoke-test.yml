@@ -38,7 +38,7 @@
       changed_when: false
       failed_when: false
 
-    - name: T3 메타DB 접속 (로컬 haproxy:{{ airflow_db_port }} → Patroni Leader)
+    - name: T3 메타DB 접속 ({{ airflow_db_host }}:{{ airflow_db_port }})
       ansible.builtin.shell:
         cmd: |
           set -a; . {{ airflow_home }}/airflow-secrets.env; set +a
@@ -96,7 +96,10 @@
               http {{ _health.status | default(0) }} · {{ parts | join(' ') }}
           - name: "T3 메타DB 접속"
             ok: "{{ (_dbcheck.rc | default(1)) == 0 }}"
-            detail: "{{ airflow_db_host }}:{{ airflow_db_port }} → Leader (rc={{ _dbcheck.rc | default('?') }})"
+            detail: >-
+              {{ airflow_db_host }}:{{ airflow_db_port }}
+              ({{ 'haproxy → Patroni Leader' if airflow_db_backend == 'patroni' else 'external' }},
+              rc={{ _dbcheck.rc | default('?') }})
           - name: "T4 로그서버 :{{ airflow_worker_log_port }}"
             ok: "{{ (_logport.stdout | default('')) | length > 0 }}"
             detail: "{{ '리슨 중' if (_logport.stdout | default('')) | length > 0 else '리슨 없음 — worker 미기동?' }}"

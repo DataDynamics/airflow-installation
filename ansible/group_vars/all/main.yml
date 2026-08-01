@@ -31,6 +31,26 @@ airflow_manage_selinux: true
 # Patroni 프로젝트가 관리하는 VIP. Airflow 는 UI 진입에만 쓴다(DB 경로에는 쓰지 않음).
 airflow_cluster_vip: 192.168.122.100
 
+# --- 메타DB 백엔드 선택 ------------------------------------------------------
+# patroni  : 기존 Patroni 클러스터에 얹는다(기본, 이 저장소가 실기 검증한 경로).
+#            Leader 를 REST 로 탐색하고, 롤/DB 는 Leader 노드에서 postgres peer 인증으로 만든다.
+#            → 인벤토리에 patroni_cluster 그룹이 있어야 한다.
+# external : Patroni 가 아닌 아무 PostgreSQL(단일 서버·다른 HA·관리형 DB).
+#            Airflow 는 airflow_db_external_host:port 하나만 바라본다.
+#            → patroni_cluster 그룹도, 로컬 haproxy 메타DB 프록시도 필요 없다.
+#              (아래 airflow_db_host/port·airflow_db_proxy_enabled 가 자동으로 따라간다)
+airflow_db_backend: patroni
+
+# external 전용 — 도달 가능한 RW 엔드포인트. HA 라면 그쪽 VIP/프록시 주소를 적는다.
+airflow_db_external_host: ""
+airflow_db_external_port: 5432
+# 롤/DB 를 이 플레이북이 만들지 여부. DBA 가 미리 만들어 주는 환경이면 false 로 두고,
+# airflow_db_user/vault_db_password 로 접속만 되면 된다(db migrate 는 그대로 수행).
+airflow_db_bootstrap: true
+# external + bootstrap=true 일 때 롤/DB 생성에 쓸 관리 계정.
+# 비밀번호는 vault_db_admin_password (group_vars/all/vault.yml).
+airflow_db_admin_user: postgres
+
 # --- 메타DB: 기존 Patroni 클러스터 ------------------------------------------
 # ⚠ Patroni 의 HAProxy(:5000)는 pgbouncer 를 거치는데, pgbouncer 가
 #   auth_type=scram-sha-256 + 정적 userlist.txt 를 쓴다. 그 파일은 Patroni 프로젝트의
@@ -39,8 +59,12 @@ airflow_cluster_vip: 192.168.122.100
 #   → pgbouncer 를 우회한다. 우리가 이미 각 노드에 띄우는 airflow-haproxy 에
 #     PostgreSQL RW 리스너를 추가해 Patroni REST(/primary)로 현재 Leader 를 찾아 직결한다.
 #   부수 효과로 pgbouncer 의 default_pool_size(=25) 경합과 transaction 풀링 위험도 사라진다.
-airflow_db_host: 127.0.0.1           # 각 노드의 로컬 airflow-haproxy
-airflow_db_port: 5433                # airflow-haproxy PostgreSQL RW 리스너
+# Airflow 가 실제로 접속하는 주소. 백엔드에 따라 자동으로 갈린다
+#   patroni  → 각 노드의 로컬 airflow-haproxy(127.0.0.1:5433) → 현재 Leader
+#   external → 지정한 외부 엔드포인트 직접
+# 둘 다 아닌 제3의 경로(예: 별도 프록시)를 쓰려면 이 두 값을 -e 로 덮어쓰면 된다.
+airflow_db_host: "{{ '127.0.0.1' if airflow_db_backend == 'patroni' else airflow_db_external_host }}"
+airflow_db_port: "{{ 5433 if airflow_db_backend == 'patroni' else airflow_db_external_port }}"
 airflow_db_name: airflow
 airflow_db_user: airflow
 airflow_db_sslmode: disable
@@ -80,11 +104,13 @@ airflow_lb_config: /etc/haproxy/airflow.cfg
 #    켜면 airflow_base_url 도 그에 맞게 바꿀 것(실제 접속 주소와 다르면 UI 링크가 깨진다).
 airflow_lb_ui_enabled: false
 #
-# ② 메타DB RW 프록시 (127.0.0.1:5433 → 현재 Patroni Leader:5432) — 기본 on.
-#    ⚠ 이걸 끄면 Airflow 가 메타DB 에 접속할 방법이 사라진다. 끄려면 airflow_db_host/
-#      airflow_db_port 를 다른 엔드포인트로 반드시 함께 바꿔야 한다.
+# ② 메타DB RW 프록시 (127.0.0.1:5433 → 현재 Patroni Leader:5432)
+#    patroni 백엔드에서만 의미가 있으므로 백엔드를 따라간다(external 이면 자동 off —
+#    그때는 Airflow 가 외부 엔드포인트로 직접 붙으므로 중간에 둘 것이 없다).
+#    ⚠ patroni 백엔드에서 이걸 끄면 Airflow 가 메타DB 에 접속할 방법이 사라진다.
+#      끄려면 airflow_db_host/airflow_db_port 를 도달 가능한 엔드포인트로 함께 바꿀 것.
 #      (Patroni 의 VIP:5000 은 pgbouncer 경유라 airflow 롤 인증이 실패한다 — 위 주석 참조)
-airflow_db_proxy_enabled: true
+airflow_db_proxy_enabled: "{{ airflow_db_backend == 'patroni' }}"
 
 # 운영자 진입점. base_url 이 실제 접속 주소와 다르면 UI 리다이렉트·링크가 깨진다.
 #   · UI LB 를 켜면      → VIP:8080 (haproxy 가 3대 api-server 로 분산)

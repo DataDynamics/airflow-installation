@@ -22,3 +22,8 @@ vault_db_password: "CHANGE_ME"
 vault_redis_password: "CHANGE_ME"
 # Airflow UI 관리자 초기 비밀번호.
 vault_admin_password: "CHANGE_ME"
+
+# airflow_db_backend=external + airflow_db_bootstrap=true 일 때만 쓰인다.
+# 외부 PostgreSQL 에 airflow 롤/DB 를 만들 관리 계정(기본 postgres)의 비밀번호.
+# patroni 백엔드에서는 필요 없다(Leader 노드에서 peer 인증으로 처리하므로).
+vault_db_admin_password: ""

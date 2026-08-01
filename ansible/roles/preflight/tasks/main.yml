@@ -86,13 +86,52 @@
       {{ inventory_hostname }}: {{ 'python3.11 설치됨'
          if _py.stat.exists else 'python3.11 미설치 — 1단계에서 repo 로부터 설치합니다' }}
 
+- name: 메타DB 백엔드 값 확인
+  ansible.builtin.assert:
+    that: airflow_db_backend in ['patroni', 'external']
+    fail_msg: "airflow_db_backend 는 patroni 또는 external 이어야 합니다 (현재: {{ airflow_db_backend }})."
+    success_msg: "메타DB 백엔드 = {{ airflow_db_backend }}"
+  run_once: true
+  delegate_to: localhost
+
+# patroni 백엔드는 patroni_cluster 그룹과 REST 도달성이 전제다.
+- name: patroni 백엔드인데 patroni_cluster 그룹이 없으면 중단
+  ansible.builtin.assert:
+    that: (groups['patroni_cluster'] | default([])) | length > 0
+    fail_msg: >-
+      airflow_db_backend=patroni 인데 인벤토리에 patroni_cluster 그룹이 없습니다.
+      Patroni 를 쓰지 않는 환경이면 airflow_db_backend=external 로 두고
+      airflow_db_external_host 를 지정하세요.
+  run_once: true
+  delegate_to: localhost
+  when: airflow_db_backend == 'patroni'
+
 - name: Patroni REST 응답 확인 (메타DB 의존성)
   ansible.builtin.uri:
     url: "http://{{ node_ip }}:{{ patroni_rest_port }}/health"
     status_code: [200, 503]
     timeout: 5
   register: _patroni
-  when: inventory_hostname in groups['patroni_cluster']
+  when:
+    - airflow_db_backend == 'patroni'
+    - inventory_hostname in (groups['patroni_cluster'] | default([]))
+
+- name: external 백엔드인데 엔드포인트가 비었으면 중단
+  ansible.builtin.assert:
+    that: airflow_db_external_host | default('') | length > 0
+    fail_msg: >-
+      airflow_db_backend=external 에는 airflow_db_external_host 가 필요합니다
+      (RW 로 붙을 수 있는 주소 — 단일 서버 IP·HA VIP·관리형 DB 엔드포인트).
+  run_once: true
+  delegate_to: localhost
+  when: airflow_db_backend == 'external'
+
+- name: 외부 메타DB 엔드포인트 도달 확인 (전 노드에서)
+  ansible.builtin.wait_for:
+    host: "{{ airflow_db_external_host }}"
+    port: "{{ airflow_db_external_port }}"
+    timeout: 10
+  when: airflow_db_backend == 'external'
 
 - name: 이미 배포된 노드인지 판별 (재실행 여부)
   ansible.builtin.stat:
@@ -110,12 +149,12 @@
   register: _port_check
   changed_when: false
   when: not _installed.stat.exists
-  loop:
-    - "{{ airflow_lb_port }}"
-    - "{{ airflow_lb_stats_port }}"
-    - "{{ airflow_api_port }}"
-    - "{{ airflow_worker_log_port }}"
-    - "{{ airflow_db_port }}"        # 로컬 메타DB RW 리스너(airflow-haproxy)
+  # 메타DB 프록시 포트는 그 리스너를 실제로 띄울 때만 본다. external 백엔드에서는
+  # airflow_db_port 가 '남의 DB 서버 포트'(보통 5432)라, 이 노드에서 점유 검사를 하면
+  # PostgreSQL 이 같이 도는 구성에서 엉뚱하게 충돌로 판정된다.
+  loop: >-
+    {{ [airflow_lb_port, airflow_lb_stats_port, airflow_api_port, airflow_worker_log_port]
+       + ([airflow_db_port] if airflow_db_proxy_enabled | bool else []) }}
 
 - name: 포트 충돌이면 중단 (이미 우리 서비스가 쓰는 중이면 무시)
   ansible.builtin.assert:

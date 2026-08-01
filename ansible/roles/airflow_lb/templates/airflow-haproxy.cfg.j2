@@ -49,7 +49,7 @@ listen airflow_pg_primary
     http-check expect status 200
     # 페일오버 시 옛 리더로 향한 세션을 끊는다. Airflow 는 pool_pre_ping 으로 이를 흡수한다.
     default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
-{% for h in groups['patroni_cluster'] %}
+{% for h in groups['patroni_cluster'] | default([]) %}
     server {{ h }} {{ hostvars[h].node_ip }}:{{ patroni_direct_port }} check port {{ patroni_rest_port }}
 {% endfor %}
 {% endif %}

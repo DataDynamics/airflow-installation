@@ -26,6 +26,9 @@ vault_jwt_secret: "$(openssl rand -hex 32)"
 vault_db_password: "$(rand_pw)"
 vault_redis_password: "$(rand_pw)"
 vault_admin_password: "$(rand_pw)"
+# airflow_db_backend=external + airflow_db_bootstrap=true 일 때만 필요하다.
+# (외부 DB 에 롤/DB 를 만들 관리 계정의 비밀번호 — 그 DB 의 실제 값으로 채울 것)
+vault_db_admin_password: ""
 EOF
 )
 

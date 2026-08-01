@@ -34,8 +34,10 @@
     - role: airflow_config
       tags: [config]
 
-- name: 2단계 — 메타DB 부트스트랩 (run_once, Leader 직결)
-  # patroni_cluster 를 함께 포함해야 REST 로 Leader 를 탐색할 수 있다.
+- name: 2단계 — 메타DB 부트스트랩 (run_once)
+  # patroni 백엔드는 patroni_cluster 를 함께 포함해야 REST 로 Leader 를 탐색할 수 있다.
+  # external 백엔드에서는 그 그룹이 없어도 되며, 없으면 "could not match host pattern"
+  # 경고 한 줄만 뜨고 airflow_cluster 로만 실행된다(정상).
   hosts: airflow_cluster:patroni_cluster
   gather_facts: false
   tags: [db]
@@ -82,4 +84,8 @@
           - "{{ 'LB stats : http://' ~ airflow_cluster_vip ~ ':' ~ airflow_lb_stats_port ~ '/' if airflow_lb_ui_enabled | bool else 'UI LB   : 꺼짐 (airflow_lb_ui_enabled=true 로 활성화)' }}"
           - "health   : curl {{ airflow_base_url }}/api/v2/monitor/health"
           - "브로커   : Sentinel({{ redis_sentinel_master_name }}) quorum={{ redis_sentinel_quorum }}"
-          - "메타DB   : 각 노드 {{ airflow_db_host }}:{{ airflow_db_port }} → Patroni Leader:{{ patroni_direct_port }} (pgbouncer 우회)"
+          - "{{ '메타DB   : 각 노드 ' ~ airflow_db_host ~ ':' ~ airflow_db_port ~
+                ' → Patroni Leader:' ~ patroni_direct_port ~ ' (pgbouncer 우회)'
+                if airflow_db_backend == 'patroni'
+                else '메타DB   : ' ~ airflow_db_host ~ ':' ~ airflow_db_port ~ ' (external — 직접 접속)' }}"
+          - "상세     : ansible-playbook playbooks/connection-info.yml"

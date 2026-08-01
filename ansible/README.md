@@ -40,6 +40,41 @@ flowchart TB
 > `airflow` 롤을 끼워 넣어도 다음 Patroni 실행 때 지워지고 `SASL authentication failed` 가 난다.
 > 우회하면 pgbouncer 의 `default_pool_size(=25)` 경합과 transaction 풀링 위험도 함께 사라진다.
 
+## 메타DB 백엔드 (`airflow_db_backend`)
+
+Patroni 는 **기본값이지 전제가 아니다.** 백엔드를 바꾸면 Patroni 없이도 배포된다.
+
+| 값 | 대상 | Airflow 가 붙는 곳 | 롤/DB 생성 방식 |
+|----|------|--------------------|-----------------|
+| `patroni` (기본) | 기존 Patroni 클러스터 | 각 노드 `127.0.0.1:5433` → REST 로 찾은 현재 Leader | Leader 노드에 위임, `postgres` **peer 인증**(비밀번호 불필요) |
+| `external` | 단일 서버·다른 HA·관리형 DB | `airflow_db_external_host:port` **직접** | 네트워크 접속, `airflow_db_admin_user` + `vault_db_admin_password` |
+
+```bash
+# Patroni 아닌 PostgreSQL 에 얹기
+ansible-playbook site.yml \
+  -e airflow_db_backend=external \
+  -e airflow_db_external_host=10.0.1.60 -e airflow_db_external_port=5432
+# 롤·DB 를 DBA 가 미리 만들어 주는 환경이면(관리 계정 불필요)
+ansible-playbook site.yml -e airflow_db_backend=external \
+  -e airflow_db_external_host=10.0.1.60 -e airflow_db_bootstrap=false
+```
+
+`external` 로 바꾸면 따라오는 것들:
+
+- `airflow_db_host`/`airflow_db_port` 가 외부 엔드포인트로 자동 전환된다.
+- **메타DB 프록시(:5433)가 자동으로 꺼진다** — 중간에 둘 것이 없기 때문. UI LB 도 끈 상태면
+  `airflow-haproxy` 인스턴스 자체가 만들어지지 않는다.
+- 인벤토리의 `patroni_cluster` 그룹이 **필요 없다**(있으면 무시). preflight 는 Patroni REST 대신
+  엔드포인트 TCP 도달성을 전 노드에서 확인한다.
+- `cluster-status`/`connection-info` 의 Patroni 표시 항목은 자동으로 빠진다.
+
+> 롤/DB 생성은 Airflow venv 의 python(psycopg2 포함)으로 실행한다. 시스템 python 에
+> `python3-psycopg2` 가 있으리란 보장이 없는 환경을 전제로 한 선택이다.
+>
+> ⚠ `external` 은 **DB HA 를 책임지지 않는다.** 그 뒤가 단일 서버면 메타DB 가 단일 장애점이고,
+> HA 라면 페일오버를 흡수할 RW 엔드포인트(VIP·프록시)를 그쪽에서 제공해야 한다.
+> Airflow 쪽은 `pool_pre_ping` 으로 끊긴 커넥션만 회수한다.
+
 ### HAProxy 두 리스너 (독립 토글)
 
 `airflow-haproxy` 인스턴스 하나가 서로 다른 두 가지를 제공하며, 각각 따로 켜고 끈다.

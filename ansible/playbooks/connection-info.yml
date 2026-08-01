@@ -32,6 +32,7 @@
       register: _primary
       changed_when: false
       failed_when: false
+      when: airflow_db_backend == 'patroni'
 
     - name: Sentinel 이 보는 현재 master
       ansible.builtin.command:
@@ -148,14 +149,19 @@
           - "                 -H 'Content-Type: application/json' \\"
           - "                 -d '{\"username\":\"{{ airflow_admin_user }}\",\"password\":\"{{ _pw_admin }}\"}' | jq -r .access_token)"
           - "  DAG 목록   : curl -s -H \"Authorization: Bearer $TOKEN\" {{ airflow_base_url }}/api/v2/dags"
-        _db:
-          - ""
+        _db_patroni:
           - "[메타DB — 기존 Patroni 클러스터]"
           - "  Airflow 경로 : {{ airflow_db_host }}:{{ airflow_db_port }} (각 노드 로컬 airflow-haproxy)"
           - "                 → 현재 Leader {{ _leader }}:{{ patroni_direct_port }} 직결 (pgbouncer 우회)"
           - "  DSN          : {{ _dsn }}"
           - "  psql         : {{ _psql }}"
           - "  Patroni      : patronictl -c /etc/patroni/patroni.yml list"
+        _db_external:
+          - "[메타DB — external]"
+          - "  엔드포인트   : {{ airflow_db_host }}:{{ airflow_db_port }} (전 노드가 직접 접속)"
+          - "  DSN          : {{ _dsn }}"
+          - "  psql         : {{ _psql }}"
+        _db: "{{ [''] + (_db_patroni if airflow_db_backend == 'patroni' else _db_external) }}"
         _broker:
           - ""
           - "[브로커 — Redis Sentinel]"

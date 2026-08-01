@@ -52,6 +52,7 @@
       register: _patroni
       changed_when: false
       failed_when: false
+      when: airflow_db_backend == 'patroni'
 
     - name: Celery 워커 등록 현황
       # raw `celery -b <url>` 를 쓰면 안 된다 — airflow.cfg 를 읽지 않아 Sentinel 의

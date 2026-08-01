@@ -21,8 +21,13 @@ execution_api_server_url = {{ airflow_execution_api_url }}
 
 [database]
 # 실제 접속 문자열은 secrets env 로 주입. 평시 경로는
+{% if airflow_db_backend == 'patroni' %}
 # 로컬 airflow-haproxy({{ airflow_db_host }}:{{ airflow_db_port }}) → 현재 Patroni Leader 의 PostgreSQL 직결.
 # pgbouncer 를 거치지 않으므로 풀링은 전적으로 여기 설정이 담당한다.
+{% else %}
+# {{ airflow_db_host }}:{{ airflow_db_port }} (external) 직접 접속. 중간 풀러가 없다면
+# 풀링은 전적으로 여기 설정이 담당한다.
+{% endif %}
 sql_alchemy_pool_size = {{ airflow_sql_pool_size }}
 sql_alchemy_max_overflow = {{ airflow_sql_max_overflow }}
 sql_alchemy_pool_recycle = {{ airflow_sql_pool_recycle }}

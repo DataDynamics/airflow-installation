@@ -1,0 +1,85 @@
+---
+# 메타DB 부트스트랩 — Patroni 가 아닌 임의의 PostgreSQL 경로.
+#
+# patroni 경로와의 차이:
+#  1) Leader 탐색이 없다. 운영자가 준 RW 엔드포인트 하나(airflow_db_external_host:port)만 쓴다.
+#     그 뒤가 단일 서버든 다른 HA 든 관리형 DB 든 이 플레이북은 알 필요가 없다.
+#  2) DB 서버에 SSH/peer 로 들어갈 수 없다고 가정한다 — 롤/DB 생성도 네트워크 접속으로 한다
+#     (그래서 관리 계정 비밀번호가 필요하다: airflow_db_admin_user / vault_db_admin_password).
+#  3) DBA 가 롤·DB 를 미리 만들어 주는 환경이면 airflow_db_bootstrap=false 로 이 단계를 건너뛴다.
+#     그때도 db migrate(스키마)는 그대로 수행한다.
+#
+# ⚠ community.postgresql 모듈은 '실행하는 인터프리터'에서 psycopg2 를 import 한다.
+#   시스템 python 에 python3-psycopg2 가 있으리란 보장이 없으므로, Airflow venv 의
+#   python(= airflow[postgres] 가 설치한 psycopg2)을 쓴다. 실측: psycopg2 2.9.12 / py3.11.
+
+- name: external 백엔드 설정 확인
+  ansible.builtin.assert:
+    that:
+      - airflow_db_external_host | default('') | length > 0
+      - not (airflow_db_bootstrap | bool) or (vault_db_admin_password | default('') | length > 0)
+    fail_msg: >-
+      external 백엔드에는 airflow_db_external_host 가 필요합니다
+      (롤/DB 를 여기서 만들려면 vault_db_admin_password 도 함께).
+      DBA 가 미리 만들어 두는 환경이면 -e airflow_db_bootstrap=false 로 실행하세요.
+    success_msg: >-
+      메타DB(external) = {{ airflow_db_external_host }}:{{ airflow_db_external_port }}
+      (부트스트랩 {{ '수행' if airflow_db_bootstrap | bool else '건너뜀' }})
+  run_once: true
+
+- name: 엔드포인트 도달 확인
+  ansible.builtin.wait_for:
+    host: "{{ airflow_db_external_host }}"
+    port: "{{ airflow_db_external_port }}"
+    timeout: 10
+  delegate_to: "{{ groups['airflow_cluster'][0] }}"
+  run_once: true
+
+# --- 롤 / DB 생성 (요청 시에만) ----------------------------------------------
+- name: 롤·DB 생성
+  when: airflow_db_bootstrap | bool
+  run_once: true
+  delegate_to: "{{ groups['airflow_cluster'][0] }}"
+  vars:
+    ansible_python_interpreter: "{{ airflow_venv }}/bin/python"
+    _pg_login:
+      login_host: "{{ airflow_db_external_host }}"
+      login_port: "{{ airflow_db_external_port }}"
+      login_user: "{{ airflow_db_admin_user }}"
+      login_password: "{{ vault_db_admin_password }}"
+  # 접속 파라미터는 한 곳에서만 정의한다(세 태스크에 흩어 놓으면 한 군데만 고치는 사고가 난다).
+  module_defaults:
+    community.postgresql.postgresql_user: "{{ _pg_login }}"
+    community.postgresql.postgresql_db: "{{ _pg_login }}"
+    community.postgresql.postgresql_privs: "{{ _pg_login }}"
+  block:
+    - name: airflow 롤 생성
+      community.postgresql.postgresql_user:
+        name: "{{ airflow_db_user }}"
+        password: "{{ vault_db_password }}"
+        role_attr_flags: LOGIN
+        login_db: postgres
+      no_log: true
+
+    # postgresql_db 는 login_db 를 받지 않는다(연결용 DB 는 maintenance_db, 기본 postgres).
+    - name: airflow 데이터베이스 생성
+      community.postgresql.postgresql_db:
+        name: "{{ airflow_db_name }}"
+        owner: "{{ airflow_db_user }}"
+        encoding: UTF8
+
+    - name: public 스키마 권한 부여 (PG15+ 는 기본 권한이 회수되어 있음)
+      community.postgresql.postgresql_privs:
+        login_db: "{{ airflow_db_name }}"
+        privs: ALL
+        type: schema
+        objs: public
+        roles: "{{ airflow_db_user }}"
+
+- name: 접속 문자열 구성
+  # patroni 경로와 달리 우회할 프록시가 없다 — Airflow 가 평소 쓰는 그 주소 그대로다.
+  ansible.builtin.set_fact:
+    _migrate_conn: >-
+      postgresql+psycopg2://{{ airflow_db_user }}:{{ vault_db_password | urlencode }}@{{ airflow_db_external_host }}:{{ airflow_db_external_port }}/{{ airflow_db_name }}?sslmode={{ airflow_db_sslmode }}
+  run_once: true
+  no_log: true

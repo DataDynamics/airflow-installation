@@ -1,91 +1,16 @@
 ---
-# 메타DB 부트스트랩 — Patroni 클러스터에 airflow 롤/DB 를 만들고 스키마를 올린다.
+# 메타DB 부트스트랩 — 롤/DB 를 만들고 스키마를 올린 뒤 관리자 계정을 넣는다.
 #
-# 설계 요지:
-#  1) Leader 는 고정이 아니다. Patroni REST(:8008/primary)로 매 실행마다 탐색한다.
-#  2) 롤/DB 생성은 Leader 노드에 위임해 postgres 계정 peer 인증으로 처리한다
-#     (superuser 비밀번호를 어디에도 두지 않는다).
-#  3) db migrate 는 pgbouncer(transaction 풀링)를 우회해 Leader:5432 에 직결한다.
-#     alembic 의 DDL·세션 수준 락이 transaction 풀링에서 깨질 수 있기 때문.
-#  4) 전부 run_once — 스키마를 세 노드가 동시에 건드리면 안 된다.
+# 백엔드마다 다른 것은 "어디에 어떻게 붙어 롤/DB 를 만드느냐" 하나뿐이다.
+# 그 부분만 bootstrap-{patroni,external}.yml 로 갈라 두고, 여기서는 두 경로가
+# 똑같이 내놓는 _migrate_conn(스키마 작업용 접속 문자열)을 받아 뒷일을 처리한다.
+#
+# 전부 run_once — 스키마를 세 노드가 동시에 건드리면 alembic 이 충돌한다.
 
-- name: Patroni Leader 탐색
-  ansible.builtin.uri:
-    url: "http://{{ node_ip }}:{{ patroni_rest_port }}/primary"
-    status_code: [200, 503]
-    timeout: 5
-  register: _primary
-  changed_when: false
-  when: inventory_hostname in groups['patroni_cluster']
+- name: 백엔드별 롤/DB 부트스트랩 ({{ airflow_db_backend }})
+  ansible.builtin.include_tasks: "bootstrap-{{ airflow_db_backend }}.yml"
 
-- name: Leader 호스트 확정
-  ansible.builtin.set_fact:
-    patroni_leader_host: "{{ item }}"
-  loop: "{{ groups['patroni_cluster'] }}"
-  when: hostvars[item]._primary.status | default(0) == 200
-  run_once: true
-
-- name: Leader 를 못 찾으면 중단
-  ansible.builtin.assert:
-    that: patroni_leader_host is defined
-    fail_msg: >-
-      Patroni Leader 를 찾지 못했습니다. 클러스터가 페일오버 중이거나 정족수를
-      잃었을 수 있습니다 — `patronictl list` 로 확인하세요.
-    success_msg: "Patroni Leader = {{ patroni_leader_host | default('?') }}"
-  run_once: true
-
-- name: airflow 롤 생성
-  community.postgresql.postgresql_user:
-    name: "{{ airflow_db_user }}"
-    password: "{{ vault_db_password }}"
-    role_attr_flags: LOGIN
-    login_db: postgres
-    login_unix_socket: "{{ postgresql_unix_socket }}"
-  become: true
-  become_user: postgres
-  delegate_to: "{{ patroni_leader_host }}"
-  run_once: true
-  no_log: true
-  vars:
-    # psycopg2 가 있는 인터프리터로 실행(§ group_vars 주석)
-    ansible_python_interpreter: "{{ postgresql_ansible_python }}"
-
-- name: airflow 데이터베이스 생성
-  community.postgresql.postgresql_db:
-    name: "{{ airflow_db_name }}"
-    owner: "{{ airflow_db_user }}"
-    encoding: UTF8
-    login_unix_socket: "{{ postgresql_unix_socket }}"
-  become: true
-  become_user: postgres
-  delegate_to: "{{ patroni_leader_host }}"
-  run_once: true
-  vars:
-    ansible_python_interpreter: "{{ postgresql_ansible_python }}"
-
-- name: public 스키마 권한 부여 (PG15+ 는 기본 권한이 회수되어 있음)
-  community.postgresql.postgresql_privs:
-    login_db: "{{ airflow_db_name }}"
-    privs: ALL
-    type: schema
-    objs: public
-    roles: "{{ airflow_db_user }}"
-    login_unix_socket: "{{ postgresql_unix_socket }}"
-  become: true
-  become_user: postgres
-  delegate_to: "{{ patroni_leader_host }}"
-  run_once: true
-  vars:
-    ansible_python_interpreter: "{{ postgresql_ansible_python }}"
-
-# --- 스키마 마이그레이션 (Leader 직결) ---------------------------------------
-- name: Leader 직결 접속 문자열 구성
-  ansible.builtin.set_fact:
-    _migrate_conn: >-
-      postgresql+psycopg2://{{ airflow_db_user }}:{{ vault_db_password | urlencode }}@{{ hostvars[patroni_leader_host].node_ip }}:{{ patroni_direct_port }}/{{ airflow_db_name }}?sslmode={{ airflow_db_sslmode }}
-  run_once: true
-  no_log: true
-
+# --- 스키마 마이그레이션 -----------------------------------------------------
 - name: db migrate
   ansible.builtin.command:
     cmd: "{{ airflow_venv }}/bin/airflow db migrate"

@@ -158,6 +158,9 @@ EOF
 topic_vars() {
   h "■ 자주 바꾸는 변수 (ansible/group_vars/all/main.yml · -e 로 덮어쓰기 가능)"
   cat <<'EOF'
+    airflow_db_backend         메타DB 백엔드: patroni | external                기본 patroni
+    airflow_db_external_host   external 일 때 붙을 RW 엔드포인트 (필수)
+    airflow_db_bootstrap       external 일 때 롤/DB 를 여기서 만들지            기본 true
     airflow_cluster_vip        VIP (Keepalived, Patroni 프로젝트 소유)          기본 192.168.122.100
     airflow_lb_ui_enabled      UI 로드밸런서(:8080) 켜기                         기본 false
     airflow_db_proxy_enabled   메타DB RW 프록시(127.0.0.1:5433) — 끄면 접속 불가  기본 true
@@ -169,6 +172,12 @@ topic_vars() {
 
     ansible-playbook site.yml -e airflow_lb_ui_enabled=true
     ansible-playbook playbooks/deploy-dags.yml -e airflow_dags_src=/path/to/dags/
+
+  Patroni 가 아닌 PostgreSQL 에 얹기 (메타DB 프록시·patroni_cluster 그룹 불필요)
+    ansible-playbook site.yml -e airflow_db_backend=external \
+      -e airflow_db_external_host=10.0.1.60 -e airflow_db_external_port=5432
+    #  롤/DB 를 DBA 가 미리 만들어 주면: -e airflow_db_bootstrap=false
+    #  직접 만들려면 vault_db_admin_password (관리 계정 비밀번호) 를 vault 에 채울 것
 
   비밀값은 group_vars/all/vault.yml (ansible-vault):
     vault_fernet_key · vault_api_secret_key · vault_jwt_secret

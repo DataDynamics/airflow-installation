@@ -62,10 +62,29 @@
     path: "{{ airflow_python }}"
   register: _py
 
-- name: python3.11 없으면 중단
+# 없다고 여기서 죽이면 안 된다 — python3.11 은 1단계(airflow_common)가 dnf 로 설치한다.
+# 특히 teardown -e teardown_remove_packages=true 는 이 패키지를 지우므로,
+# 하드 실패로 두면 teardown → 재배포 루프가 항상 0단계에서 막힌다.
+# 대신 '지금 구할 수 있는지'를 확인한다. repo 에 없으면 1단계에서 어차피 실패하는데,
+# 그때는 계정·디렉터리를 이미 만든 뒤라 절반만 배포된 상태가 된다.
+- name: python3.11 이 repo 에서 설치 가능한지 확인
+  ansible.builtin.command:
+    cmd: dnf -q list --available {{ airflow_python | basename }}
+  register: _py_avail
+  changed_when: false
+  failed_when: false
+  when: not _py.stat.exists
+
+- name: python3.11 을 구할 수 없으면 중단
   ansible.builtin.assert:
-    that: [_py.stat.exists]
-    fail_msg: "{{ inventory_hostname }}: {{ airflow_python }} 없음 — AppStream python3.11 설치 필요"
+    that: _py.stat.exists or (_py_avail.rc | default(1)) == 0
+    fail_msg: >-
+      {{ inventory_hostname }}: {{ airflow_python }} 도 없고 repo 에서도 찾을 수 없습니다 —
+      RHEL 9 AppStream(또는 사내 미러)에 python3.11 이 보이는지 확인하세요:
+      `dnf list --available python3.11`
+    success_msg: >-
+      {{ inventory_hostname }}: {{ 'python3.11 설치됨'
+         if _py.stat.exists else 'python3.11 미설치 — 1단계에서 repo 로부터 설치합니다' }}
 
 - name: Patroni REST 응답 확인 (메타DB 의존성)
   ansible.builtin.uri:

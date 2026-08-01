@@ -152,6 +152,9 @@ ansible-playbook playbooks/teardown.yml -e teardown_confirm=yes \
   -e teardown_remove_packages=true -e teardown_include_patroni=true
 ```
 
+②·③ 은 `python3.11`(+pip/devel)·`redis` 까지 지운다. 재배포 시 1단계가 repo 에서 다시 설치하므로
+그대로 `site.yml` 을 돌리면 된다 — 0단계 preflight 는 "설치돼 있거나 repo 에서 구할 수 있으면" 통과한다.
+
 ⚠ **되돌릴 수 없다.** 메타DB 스키마·DAG·로그·설정이 사라지므로 `teardown_confirm=yes`
 없이는 아무것도 하지 않는다. 사내 미러 repo(`local-*`)와 범용 OS 도구(gcc/tar/rsync 등)는
 의도적으로 남긴다 — 전자를 지우면 재설치가 불가능해지고, 후자는 이 스택 전용이 아니다.

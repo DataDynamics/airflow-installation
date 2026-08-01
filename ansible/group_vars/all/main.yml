@@ -35,7 +35,10 @@ airflow_manage_selinux: true
 
 # --- 클러스터 VIP (Keepalived) ----------------------------------------------
 # Patroni 프로젝트가 관리하는 VIP. Airflow 는 UI 진입에만 쓴다(DB 경로에는 쓰지 않음).
-airflow_cluster_vip: 192.168.122.100
+# ⚠ 이 값은 저쪽 keepalived.conf 의 virtual_ipaddress 와 반드시 같아야 한다.
+#   2026-08-02 실측에서 어긋나 있었다(여기 .100 / 실제 배포 .10) — 죽은 주소를 안내하게 된다.
+#   확인: ansible airflow_cluster -a "ip -4 -o addr show" | grep <VIP>
+airflow_cluster_vip: 192.168.122.10
 
 # --- 메타DB 백엔드 선택 ------------------------------------------------------
 # patroni  : 기존 Patroni 클러스터에 얹는다(기본, 이 저장소가 실기 검증한 경로).
@@ -118,12 +121,21 @@ airflow_lb_ui_enabled: false
 #      (Patroni 의 VIP:5000 은 pgbouncer 경유라 airflow 롤 인증이 실패한다 — 위 주석 참조)
 airflow_db_proxy_enabled: "{{ airflow_db_backend == 'patroni' }}"
 
-# 운영자 진입점. base_url 이 실제 접속 주소와 다르면 UI 리다이렉트·링크가 깨진다.
+# 운영자 진입점. base_url 이 실제 접속 주소와 다르면 UI 가 깨진다 —
+# 증상은 "로그인 직후 엉뚱한 주소로 튕김"이다(FAB 가 /auth/ 에서 base_url 로 302 를 준다).
+#
+# 앞단에 외부 LB·리버스프록시·DNS 가 있으면 **그 주소**를 여기에 적는다.
+# 비워 두면 VIP 기준으로 자동 계산한다:
 #   · UI LB 를 켜면      → VIP:8080 (haproxy 가 3대 api-server 로 분산)
 #   · 끄면(기본)          → VIP:8081 (VIP 를 쥔 노드의 api-server 로 직접)
-# 앞단에 외부 LB·DNS 를 둔다면 이 값을 그 주소로 바꿀 것.
+#
+# 현재 랩: KVM 호스트(10.0.1.50)의 haproxy 가 :18081 → 게스트망 api-server 3대로 넘긴다.
+# 운영자 브라우저는 게스트망(192.168.122.0/24)에 직접 닿지 않으므로 이 주소가 유일한 진입점이다.
+airflow_external_base_url: "http://10.0.1.50:18081"
+
 airflow_base_url: >-
-  http://{{ airflow_cluster_vip }}:{{ airflow_lb_port if airflow_lb_ui_enabled | bool else airflow_api_port }}
+  {{ airflow_external_base_url if (airflow_external_base_url | default('') | length > 0)
+     else 'http://' ~ airflow_cluster_vip ~ ':' ~ (airflow_lb_port if airflow_lb_ui_enabled | bool else airflow_api_port) }}
 # 워커는 LB 를 거치지 않고 자기 노드 api-server 를 직접 호출한다(단일 장애점 제거).
 airflow_execution_api_url: "http://127.0.0.1:{{ airflow_api_port }}/execution/"
 

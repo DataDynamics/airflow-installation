@@ -13,8 +13,15 @@
       - libpq
       - libpq-devel
       - openldap
+      # Hive/Impala 를 thrift 로 붙을 때 쓰는 SASL 런타임. GSSAPI(Kerberos)·PLAIN(LDAP)
+      # 메커니즘은 각각 별도 플러그인 패키지에 들어 있어, lib 만 있으면
+      # 'Unsupported mechanism' 으로 인증 단계에서 막힌다.
       - cyrus-sasl-lib
+      - cyrus-sasl-gssapi
+      - cyrus-sasl-plain
       - krb5-libs
+      # kinit/klist — kerberized 클러스터에서 티켓을 얻고 확인하는 데 필요하다.
+      - krb5-workstation
       - redis                     # 브로커. sentinel 바이너리도 이 패키지에 포함
       - haproxy                   # Airflow UI LB (Patroni 쪽과 별도 인스턴스로 기동)
       - rsync                     # DAG 배포(synchronize 모듈)

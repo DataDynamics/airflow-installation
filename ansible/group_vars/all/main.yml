@@ -16,7 +16,13 @@ airflow_version: "3.3.0"
 airflow_python: /usr/bin/python3.11          # RHEL 9 AppStream. 3.2+ 는 3.10 미만 미지원
 # 빌드머신에서 만든 airgap 번들(wheelhouse + constraints). 이 저장소 dist/ 기준.
 airflow_bundle_src: "{{ airflow_repo_root }}/dist/airflow-{{ airflow_version }}-airgap-bundle.tar.gz"
-airflow_extras: "celery,postgres,redis,fab,standard,common-sql,ssh,apache-kafka,sftp,ftp,apache-hdfs,samba,pandas,uv,async,ldap"
+# ⚠ 이 목록은 wheelhouse 를 만들 때 쓴 EXTRAS 와 반드시 같아야 한다.
+#   venv 설치는 --no-index(오프라인)라, 번들에 없는 extra 를 여기 적으면 그 자리에서 실패한다.
+#   같이 고칠 곳: build/build-wheelhouse-{docker,rhel}.sh · install/env.sh
+#   amazon(S3) · apache-hive(HiveServer2) · apache-impala 는 3.3.0 constraints 로 검증:
+#     amazon 9.31.0(boto3) · apache-hive 9.5.0(PyHive·thrift·thrift-sasl) · apache-impala 1.9.3(impyla)
+#   ObjectStoragePath("s3://…") 나 pandas 의 s3:// 경로를 쓸 거면 s3fs 를 추가로 넣어야 한다.
+airflow_extras: "celery,postgres,redis,fab,standard,common-sql,ssh,apache-kafka,sftp,ftp,apache-hdfs,samba,pandas,uv,async,ldap,amazon,apache-hive,apache-impala"
 
 # --- 설치 경로 / 계정 --------------------------------------------------------
 airflow_install_root: /opt

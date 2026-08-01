@@ -7,7 +7,7 @@ set -euo pipefail
 
 AF_VERSION="${AF_VERSION:-3.3.0}"
 PY_TAG="3.11"
-EXTRAS="${EXTRAS:-celery,postgres,redis,fab,standard,common-sql,ssh,apache-kafka,sftp,ftp,apache-hdfs,samba,pandas,uv,async,ldap}"
+EXTRAS="${EXTRAS:-celery,postgres,redis,fab,standard,common-sql,ssh,apache-kafka,sftp,ftp,apache-hdfs,samba,pandas,uv,async,ldap,amazon,apache-hive,apache-impala}"
 IMAGE="registry.access.redhat.com/ubi9/python-311:latest"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

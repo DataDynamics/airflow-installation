@@ -12,7 +12,12 @@ libpq
 libpq-devel
 openldap
 krb5-libs
+krb5-workstation
 cyrus-sasl-lib
+# Hive/Impala thrift 인증 메커니즘 플러그인(GSSAPI=Kerberos, PLAIN=LDAP).
+# lib 만 있으면 'Unsupported mechanism' 으로 막힌다.
+cyrus-sasl-gssapi
+cyrus-sasl-plain
 postgresql
 postgresql-server
 postgresql-contrib

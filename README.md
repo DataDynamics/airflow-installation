@@ -166,6 +166,9 @@ flowchart TB
 ```bash
 ./build/build-wheelhouse-docker.sh   # wheelhouse 생성 (docker, ubi9/python-311)
 #   또는  ./build/build-wheelhouse-rhel.sh   # RHEL 9 네이티브(docker 불필요, python3.11)
+#   provider 추가는 여기서만 가능하다(대상은 --no-index 오프라인 설치):
+#     EXTRAS="...,trino" ./build/build-wheelhouse-docker.sh
+#     → install/env.sh 의 EXTRAS 와 ansible/group_vars/all/main.yml 의 airflow_extras 도 같이 수정
 ./build/extract-rpms-docker.sh       # (선택) OS RPM 추출 — 완전 오프라인 설치용 (또는 -rhel.sh)
 ./build/package.sh                   # dist/airflow-3.3.0-airgap-bundle.tar.gz 생성
 ```

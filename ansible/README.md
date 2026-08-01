@@ -126,6 +126,12 @@ ls ../dist/airflow-3.3.0-airgap-bundle.tar.gz || (cd .. && ./build/build-wheelho
 ./scripts/gen-vault.sh          # → group_vars/all/vault.yml (암호화) + .vault_pass
 ```
 
+> **provider 를 늘리려면 번들부터 다시 만들어야 한다.** venv 는 `--no-index` 로 wheelhouse 에서만
+> 설치하므로, `airflow_extras` 에 번들에 없는 extra 를 적으면 그 자리에서 실패한다.
+> 현재 포함: `amazon`(S3) · `apache-hive`(HiveServer2) · `apache-impala` · `sftp` · `apache-hdfs` ·
+> `apache-kafka` · `samba` · `ftp` · `ssh` 등. 추가 시 `build/build-wheelhouse-*.sh` 의 `EXTRAS`,
+> `install/env.sh` 의 `EXTRAS`, `group_vars/all/main.yml` 의 `airflow_extras` **세 곳을 함께** 고칠 것.
+
 > `.vault_pass` 와 `group_vars/all/vault.yml` 은 `.gitignore` 대상이다.
 > **`.vault_pass` 를 잃으면 비밀을 복구할 수 없다** — 별도 보관할 것.
 

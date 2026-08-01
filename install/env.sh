@@ -20,7 +20,11 @@ export PY_TAG="3.11"
 export PYTHON_BIN="${PYTHON_BIN:-/usr/bin/python3.11}"
 # 3.x extras: hdfs→apache-hdfs 개명, password extra 삭제(FAB provider에 통합),
 # fab(로그인 UI/사용자 관리)·standard(기본 오퍼레이터) 명시 필요.
-export EXTRAS="celery,postgres,redis,fab,standard,common-sql,ssh,apache-kafka,sftp,ftp,apache-hdfs,samba,pandas,uv,async,ldap"
+# ⚠ wheelhouse 를 만든 EXTRAS 와 반드시 같아야 한다(오프라인 설치라 없는 extra 는 즉시 실패).
+#   같이 고칠 곳: build/build-wheelhouse-{docker,rhel}.sh · ansible/group_vars/all/main.yml
+# amazon=S3, apache-hive=HiveServer2(thrift), apache-impala=impyla.
+# S3 를 ObjectStoragePath/pandas 의 s3:// 로 쓸 거면 s3fs 도 추가할 것.
+export EXTRAS="celery,postgres,redis,fab,standard,common-sql,ssh,apache-kafka,sftp,ftp,apache-hdfs,samba,pandas,uv,async,ldap,amazon,apache-hive,apache-impala"
 
 # === [1] 설치 경로 ============================================================
 # INSTALL_ROOT 만 바꾸면 전체 트리 이동. 예) 별도 디스크 /app:  INSTALL_ROOT=/app

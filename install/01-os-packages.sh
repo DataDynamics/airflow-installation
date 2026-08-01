@@ -16,8 +16,11 @@ source "$(dirname "$0")/env.sh"
 DISPGDG=(--disablerepo='pgdg*')
 
 # 1) 필수 런타임 (이미 설치돼 있으면 그대로) — python3.11 + 인증/로깅 런타임 라이브러리
+# cyrus-sasl-gssapi/plain: Hive·Impala 를 thrift 로 붙을 때 쓰는 SASL 메커니즘 플러그인
+# (lib 만 있으면 'Unsupported mechanism' 으로 막힌다), krb5-workstation: kinit/klist
 dnf -y install python3.11 python3.11-pip policycoreutils-python-utils tar gzip which procps-ng \
-    openldap cyrus-sasl-lib krb5-libs "${DISPGDG[@]}" --nobest --skip-broken || true
+    openldap cyrus-sasl-lib cyrus-sasl-gssapi cyrus-sasl-plain krb5-libs krb5-workstation \
+    "${DISPGDG[@]}" --nobest --skip-broken || true
 
 # 2) libpq 런타임: 이미 libpq.so.5 를 제공하는 패키지(PGDG postgresql*-libs 등)가 있으면 설치 생략
 ldconfig -p 2>/dev/null | grep -q 'libpq\.so\.5' || \
